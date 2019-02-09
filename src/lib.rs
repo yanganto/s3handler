@@ -4,7 +4,6 @@ extern crate log;
 extern crate serde_derive;
 extern crate colored;
 
-use std;
 use std::fs::{File, write, metadata};
 use std::io::prelude::*;
 use std::str::FromStr;
