@@ -293,10 +293,10 @@ impl<'a> Handler<'a>  {
             AuthType::AWS4 => { std::str::from_utf8(&self.aws_v4_request("GET", None,"/", &Vec::new(), Vec::new())?.0).unwrap_or("").to_string()},
             AuthType::AWS2 => { std::str::from_utf8(&self.aws_v2_request("GET", "/", &Vec::new(), &Vec::new())?.0).unwrap_or("").to_string()}
         };
-        let result:serde_json::Value;
         let mut buckets = Vec::new();
         match self.format {
             Format::JSON => {
+                let result:serde_json::Value;
                 result = serde_json::from_str(&res).unwrap();
                 for bucket_list in  result[1].as_array(){
                     for bucket in bucket_list{
@@ -864,6 +864,34 @@ impl<'a> Handler<'a>  {
             AuthType::AWS4 => {self.aws_v4_request("DELETE", virtural_host, &uri, &query_string, Vec::new());},
             AuthType::AWS2 => {self.aws_v2_request("DELETE", &format!("/{}{}", &caps["bucket"], &caps["object"]), &query_string, &Vec::new());}
         }
+        Ok(())
+    }
+
+    pub fn usage(&self, target: &str, options: &Vec<(&str, &str)>) -> Result<(), &'static str>  {
+        let re = Regex::new(S3_FORMAT).unwrap();
+        let mut uri = format!("/admin/bucket");
+        let caps = match re.captures(target) {
+            Some(c) => c,
+            None => return Err("S3 format error.")
+        };
+        let bucket = caps["bucket"].to_string();
+        let mut query_strings = options.clone();
+        query_strings.push(("bucket", &bucket));
+        let result = match self.auth_type {
+            AuthType::AWS4 => {self.aws_v4_request("GET", None, &uri, &query_strings, Vec::new())?},
+            AuthType::AWS2 => {self.aws_v2_request("GET", &uri, &query_strings, &Vec::new())?}
+        };
+        match self.format {
+            Format::JSON => {
+                let json:serde_json::Value;
+                json = serde_json::from_str(std::str::from_utf8(&result.0).unwrap_or("")).unwrap();
+                println!("{}", serde_json::to_string_pretty(&json["usage"]).unwrap_or("".to_string()));
+            },
+            Format::XML => {
+                // TODO:
+                // Ceph Ops api may not support xml
+            }
+        };
         Ok(())
     }
 
