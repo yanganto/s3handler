@@ -52,7 +52,7 @@ pub struct CredentialConfig {
     pub host: String,
     pub user: Option<String>,
     pub access_key: String,
-    pub secrete_key: String,
+    pub secret_key: String,
     pub region: Option<String>,
     pub s3_type: Option<String>
 }
@@ -76,7 +76,7 @@ pub enum UrlStyle{
 pub struct Handler<'a>{
     pub host: &'a str,
     pub access_key: &'a str,
-    pub secrete_key: &'a str,
+    pub secret_key: &'a str,
     pub auth_type:AuthType,
     pub format: Format,
     pub url_style: UrlStyle,
@@ -125,7 +125,7 @@ impl<'a> Handler<'a>  {
         query.push('?');
         query.push_str(&aws::canonical_query_string(& mut query_strings));
         let signature = aws::aws_s3_v2_sign(
-            self.secrete_key, 
+            self.secret_key, 
             &aws::aws_s3_v2_get_string_to_signed(method, uri, &mut signed_headers, payload)
         );
         let mut authorize_string = String::from_str("AWS ").unwrap();
@@ -201,7 +201,7 @@ impl<'a> Handler<'a>  {
         query.push('?');
         query.push_str(&aws::canonical_query_string(& mut query_strings));
         let signature = 
-            aws::aws_v4_sign(self.secrete_key, 
+            aws::aws_v4_sign(self.secret_key, 
                              aws::aws_v4_get_string_to_signed(
                                   method,
                                   uri,
@@ -980,13 +980,13 @@ impl<'a> Handler<'a>  {
     pub fn init_from_config(credential: &'a CredentialConfig) -> Self {
         debug!("host: {}", credential.host);
         debug!("access key: {}", credential.access_key);
-        debug!("secrete key: {}", credential.secrete_key);
+        debug!("secret key: {}", credential.secret_key);
         match credential.clone().s3_type.unwrap_or("".to_string()).as_str() {
             "aws" => {
                 Handler {
                     host: &credential.host,
                     access_key: &credential.access_key,
-                    secrete_key: &credential.secrete_key,
+                    secret_key: &credential.secret_key,
                     auth_type: AuthType::AWS4, 
                     format: Format::XML,
                     url_style: UrlStyle::HOST, 
@@ -997,7 +997,7 @@ impl<'a> Handler<'a>  {
                 Handler {
                     host: &credential.host,
                     access_key: &credential.access_key,
-                    secrete_key: &credential.secrete_key,
+                    secret_key: &credential.secret_key,
                     auth_type: AuthType::AWS4,
                     format: Format::JSON, 
                     url_style: UrlStyle::PATH,
@@ -1008,7 +1008,7 @@ impl<'a> Handler<'a>  {
                 Handler {
                     host: &credential.host,
                     access_key: &credential.access_key,
-                    secrete_key: &credential.secrete_key,
+                    secret_key: &credential.secret_key,
                     auth_type: AuthType::AWS4, 
                     format: Format::XML, 
                     url_style: UrlStyle::PATH, 
