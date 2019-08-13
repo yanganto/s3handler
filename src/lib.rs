@@ -1,3 +1,16 @@
+//! Initilize S3 handler to manipulate objects and buckets
+//! ```
+//! let config = s3handler::CredentialConfig{
+//!     host: "s3.us-east-1.amazonaws.com".to_string(),
+//!     access_key: "akey".to_string(),
+//!     secret_key: "skey".to_string(),
+//!     user: None,
+//!     region: None, // default is us-east-1
+//!     s3_type: None, // default will try to config as AWS S3 handler
+//! };
+//! let handler = s3handler::Handler::init_from_config(&config);
+//! let _ = handler.ls();
+//! ```
 #[macro_use]
 extern crate log;
 #[macro_use]
@@ -11,7 +24,7 @@ use std::str::FromStr;
 
 use chrono::prelude::*;
 use colored::*;
-use log::{Level, LevelFilter, Metadata, Record};
+use log::{Level, Metadata, Record};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
@@ -47,6 +60,15 @@ impl log::Log for MyLogger {
     fn flush(&self) {}
 }
 
+/// # The struct for credential config for each S3 cluster
+/// - host is a parameter for the server you want to link
+///     - it can be s3.us-east-1.amazonaws.com or a ip, ex 10.1.1.100, for a ceph node
+/// - user name is not required, because it only show in the prompt of shell
+/// - access_key and secret_key are keys to connect to the cluster providing S3
+/// - region is a paramter for the S3 cluster location
+///     - if region is not specified, it will take default value us-east-1
+/// - s3 type is a shortcut to set up auth type, format, url style for aws or ceph
+///     - if s3_type is not specified, it will take aws as default value, aws
 #[derive(Debug, Clone, Deserialize)]
 pub struct CredentialConfig {
     pub host: String,
@@ -57,21 +79,61 @@ pub struct CredentialConfig {
     pub s3_type: Option<String>,
 }
 
+/// # The signature type of Authentication
+/// AWS2, AWS4 represent for AWS signature v2 and AWS signature v4
+/// The v2 and v4 signature are both supported by CEPH.
+/// Generally, AWS support v4 signature, and only limited support v2 signature.
+/// following AWS region support v2 signature before June 24, 2019
+/// - US East (N. Virginia) Region
+/// - US West (N. California) Region
+/// - US West (Oregon) Region
+/// - EU (Ireland) Region
+/// - Asia Pacific (Tokyo) Region
+/// - Asia Pacific (Singapore) Region
+/// - Asia Pacific (Sydney) Region
+/// - South America (So Paulo) Region
 pub enum AuthType {
     AWS4,
     AWS2,
 }
 
+/// # The response format
+/// AWS only support XML format (default)
+/// CEPH support JSON and XML
 pub enum Format {
     JSON,
     XML,
 }
 
+/// # The request URL style
+///
+/// CEPH support JSON and XML
 pub enum UrlStyle {
     PATH,
     HOST,
 }
 
+/// # The struct for generate the request
+/// - host is a parameter for the server you want to link
+///     - it can be s3.us-east-1.amazonaws.com or a ip, ex 10.1.1.100, for a ceph node
+/// - access_key and secret_key are keys to connect to the cluster providing S3
+/// - auth_type specify the signature version of S3
+/// - format specify the s3 response from server
+/// - url_style specify the s3 request url style
+/// - region is a paramter for the S3 cluster location
+///     - if region is not specified, it will take default value us-east-1
+/// It can be init from the config structure, for example:
+/// ```
+/// let config = s3handler::CredentialConfig{
+///     host: "s3.us-east-1.amazonaws.com".to_string(),
+///     access_key: "akey".to_string(),
+///     secret_key: "skey".to_string(),
+///     user: None,
+///     region: None, // default is us-east-1
+///     s3_type: None, // default will try to config as AWS S3 handler
+/// };
+/// let handler = s3handler::Handler::init_from_config(&config);
+/// ```
 pub struct Handler<'a> {
     pub host: &'a str,
     pub access_key: &'a str,
@@ -412,6 +474,7 @@ impl<'a> Handler<'a> {
         )
     }
 
+    /// List all objects in a bucket
     pub fn la(&self) -> Result<(), &'static str> {
         let re = Regex::new(RESPONSE_FORMAT).unwrap();
         let mut res = match self.auth_type {
@@ -614,6 +677,7 @@ impl<'a> Handler<'a> {
         Ok(())
     }
 
+    /// List all bucket of an account
     pub fn ls(&self, bucket: Option<&str>) -> Result<(), &'static str> {
         let res: String;
         match bucket {
@@ -787,6 +851,7 @@ impl<'a> Handler<'a> {
         Ok(())
     }
 
+    /// Upload a file to a S3 bucket
     pub fn put(&self, file: &str, dest: &str) -> Result<(), &'static str> {
         if file == "" || dest == "" {
             return Err("please specify the file and the destiney");
@@ -999,6 +1064,7 @@ impl<'a> Handler<'a> {
         Ok(())
     }
 
+    /// Download an object from S3 service
     pub fn get(&self, src: &str, file: Option<&str>) -> Result<(), &'static str> {
         if src == "" {
             return Err("Please specify the object");
@@ -1070,6 +1136,7 @@ impl<'a> Handler<'a> {
         }
     }
 
+    /// Show an object's content, this method is use for quick check a small object on the fly
     pub fn cat(&self, src: &str) -> Result<(), &'static str> {
         if src == "" {
             return Err("please specific the object");
@@ -1130,6 +1197,9 @@ impl<'a> Handler<'a> {
         }
     }
 
+    /// Delete with header flags for some deletion features
+    /// - AWS - delete-marker
+    /// - Bigtera - secure-delete
     pub fn del_with_flag(
         &self,
         src: &str,
@@ -1179,10 +1249,13 @@ impl<'a> Handler<'a> {
         };
         Ok(())
     }
+
+    /// Delete an object
     pub fn del(&self, src: &str) -> Result<(), &'static str> {
         self.del_with_flag(src, &Vec::new())
     }
 
+    /// Make a new bucket
     pub fn mb(&self, bucket: &str) -> Result<(), &'static str> {
         if bucket == "" {
             return Err("please specific the bucket name");
@@ -1200,6 +1273,7 @@ impl<'a> Handler<'a> {
         Ok(())
     }
 
+    /// Remove a bucket
     pub fn rb(&self, bucket: &str) -> Result<(), &'static str> {
         if bucket == "" {
             return Err("please specific the bucket name");
@@ -1217,6 +1291,7 @@ impl<'a> Handler<'a> {
         Ok(())
     }
 
+    /// list all tags of an object
     pub fn list_tag(&self, target: &str) -> Result<(), &'static str> {
         let res: String;
         debug!("target: {:?}", target);
@@ -1281,6 +1356,7 @@ impl<'a> Handler<'a> {
         Ok(())
     }
 
+    /// Put a tag on an object
     pub fn add_tag(&self, target: &str, tags: &Vec<(&str, &str)>) -> Result<(), &'static str> {
         debug!("target: {:?}", target);
         debug!("tags: {:?}", tags);
@@ -1342,6 +1418,7 @@ impl<'a> Handler<'a> {
         Ok(())
     }
 
+    /// Remove aa tag from an object
     pub fn del_tag(&self, target: &str) -> Result<(), &'static str> {
         debug!("target: {:?}", target);
         if target == "" {
@@ -1394,6 +1471,7 @@ impl<'a> Handler<'a> {
         Ok(())
     }
 
+    /// Show the usage of a bucket (CEPH only)
     pub fn usage(&self, target: &str, options: &Vec<(&str, &str)>) -> Result<(), &'static str> {
         let re = Regex::new(S3_FORMAT).unwrap();
         let mut uri = format!("/admin/bucket");
@@ -1429,6 +1507,8 @@ impl<'a> Handler<'a> {
         Ok(())
     }
 
+    /// Do a GET request for the specific URL
+    /// This method is easily to show the configure of S3 not implemented
     pub fn url_command(&self, url: &str) -> Result<(), &'static str> {
         let mut uri = String::new();
         let mut raw_qs = String::new();
@@ -1463,7 +1543,7 @@ impl<'a> Handler<'a> {
         println!("{}", std::str::from_utf8(&result.0).unwrap_or(""));
         Ok(())
     }
-
+    /// Change S3 type to aws/ceph
     pub fn change_s3_type(&mut self, command: &str) {
         println!("set up s3 type as {}", command);
         if command.ends_with("aws") {
@@ -1481,6 +1561,17 @@ impl<'a> Handler<'a> {
         }
     }
 
+    /// Change signature version to aws2/aws4
+    /// CEPH support aws2 and aws4
+    /// following AWS region support v2 signature before June 24, 2019
+    /// - US East (N. Virginia) Region
+    /// - US West (N. California) Region
+    /// - US West (Oregon) Region
+    /// - EU (Ireland) Region
+    /// - Asia Pacific (Tokyo) Region
+    /// - Asia Pacific (Singapore) Region
+    /// - Asia Pacific (Sydney) Region
+    /// - South America (So Paulo) Region
     pub fn change_auth_type(&mut self, command: &str) {
         if command.ends_with("aws2") {
             self.auth_type = AuthType::AWS2;
@@ -1493,6 +1584,9 @@ impl<'a> Handler<'a> {
         }
     }
 
+    /// Change response format to xml/json
+    /// CEPH support json and xml
+    /// AWS only support xml
     pub fn change_format_type(&mut self, command: &str) {
         if command.ends_with("xml") {
             self.format = Format::XML;
@@ -1505,6 +1599,7 @@ impl<'a> Handler<'a> {
         }
     }
 
+    /// Change request url style
     pub fn change_url_style(&mut self, command: &str) {
         if command.ends_with("path") {
             self.url_style = UrlStyle::PATH;
@@ -1517,6 +1612,18 @@ impl<'a> Handler<'a> {
         }
     }
 
+    /// Initailize the `Handler` from `CredentialConfig`
+    /// ```
+    /// let config = s3handler::CredentialConfig{
+    ///     host: "s3.us-east-1.amazonaws.com".to_string(),
+    ///     access_key: "akey".to_string(),
+    ///     secret_key: "skey".to_string(),
+    ///     user: None,
+    ///     region: None, // default is us-east-1
+    ///     s3_type: None, // default will try to config as AWS S3 handler
+    /// };
+    /// let handler = s3handler::Handler::init_from_config(&config);
+    /// ```
     pub fn init_from_config(credential: &'a CredentialConfig) -> Self {
         debug!("host: {}", credential.host);
         debug!("access key: {}", credential.access_key);
