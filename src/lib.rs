@@ -23,8 +23,6 @@ use std::path::Path;
 use std::str::FromStr;
 
 use chrono::prelude::*;
-use colored::*;
-use log::{Level, Metadata, Record};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
@@ -36,29 +34,6 @@ mod aws;
 static S3_FORMAT: &'static str =
     r#"[sS]3://(?P<bucket>[A-Za-z0-9\-\._]+)(?P<object>[A-Za-z0-9\-\._/]*)"#;
 static RESPONSE_FORMAT: &'static str = r#""Contents":\["([A-Za-z0-9\-\._]+?)"(.*?)\]"#;
-
-static MY_LOGGER: MyLogger = MyLogger;
-
-struct MyLogger;
-
-impl log::Log for MyLogger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Trace
-    }
-
-    fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            match record.level() {
-                log::Level::Error => println!("{} - {}", "ERROR".red().bold(), record.args()),
-                log::Level::Warn => println!("{} - {}", "WARN".red(), record.args()),
-                log::Level::Info => println!("{} - {}", "INFO".cyan(), record.args()),
-                log::Level::Debug => println!("{} - {}", "DEBUG".blue().bold(), record.args()),
-                log::Level::Trace => println!("{} - {}", "TRACE".blue(), record.args()),
-            }
-        }
-    }
-    fn flush(&self) {}
-}
 
 /// # The struct for credential config for each S3 cluster
 /// - host is a parameter for the server you want to link
@@ -144,25 +119,31 @@ pub struct Handler<'a> {
     pub region: Option<String>,
 }
 
-fn print_response(res: &mut Response) -> (Vec<u8>, reqwest::header::HeaderMap) {
-    let mut body = Vec::new();
-    let _ = res.read_to_end(&mut body);
-    if res.status().is_success() || res.status().is_redirection() {
-        info!("Status: {}", res.status());
-        info!("Headers:\n{:?}", res.headers());
-        info!(
-            "Body:\n{}\n\n",
-            std::str::from_utf8(&body).expect("Body can not decode as UTF8")
-        );
-    } else {
-        error!("Status: {}", res.status());
-        error!("Headers:\n{:?}", res.headers());
-        error!(
-            "Body:\n{}\n\n",
-            std::str::from_utf8(&body).expect("Body can not decode as UTF8")
-        );
+trait ResponseHandler {
+    fn handle_response(&mut self) -> (Vec<u8>, reqwest::header::HeaderMap);
+}
+
+impl ResponseHandler for Response {
+    fn handle_response(&mut self) -> (Vec<u8>, reqwest::header::HeaderMap) {
+        let mut body = Vec::new();
+        let _ = self.read_to_end(&mut body);
+        if self.status().is_success() || self.status().is_redirection() {
+            info!("Status: {}", self.status());
+            info!("Headers:\n{:?}", self.headers());
+            info!(
+                "Body:\n{}\n\n",
+                std::str::from_utf8(&body).expect("Body can not decode as UTF8")
+            );
+        } else {
+            error!("Status: {}", self.status());
+            error!("Headers:\n{:?}", self.headers());
+            error!(
+                "Body:\n{}\n\n",
+                std::str::from_utf8(&body).expect("Body can not decode as UTF8")
+            );
+        }
+        (body, self.headers().clone())
     }
-    (body, res.headers().clone())
 }
 
 impl<'a> Handler<'a> {
@@ -252,9 +233,8 @@ impl<'a> Handler<'a> {
             }
         }
         match action.body((*payload).clone()).send() {
-            // XXX fix payload as Vec<u8>
-            Ok(mut res) => Ok(print_response(&mut res)),
-            Err(_) => Err("Reqwest Error"), //XXX
+            Ok(mut res) => Ok(res.handle_response()),
+            Err(_) => Err("Reqwest Error"),
         }
     }
 
@@ -389,8 +369,8 @@ impl<'a> Handler<'a> {
             Ok(mut res) => {
                 match res.status().is_redirection() {
                     true => {
-                        let response = print_response(&mut res);
-                        let result = std::str::from_utf8(&response.0).unwrap_or("");
+                        let body = res.handle_response().0;
+                        let result = std::str::from_utf8(&body).unwrap_or("");
                         let mut endpoint = "".to_string();
                         match self.format {
                             Format::JSON => {
@@ -446,10 +426,10 @@ impl<'a> Handler<'a> {
                             Some(endpoint),
                         )
                     }
-                    false => Ok(print_response(&mut res)),
+                    false => Ok(res.handle_response()),
                 }
             }
-            Err(_) => Err("Reqwest Error"), //XXX
+            Err(_) => Err("Reqwest Error"),
         }
     }
 
@@ -682,7 +662,7 @@ impl<'a> Handler<'a> {
         let res: String;
         match bucket {
             Some(b) => {
-                let mut uri: String;
+                let uri: String;
                 let mut re = Regex::new(S3_FORMAT).unwrap();
                 let mut vitural_host = None;
                 if b.starts_with("s3://") || b.starts_with("S3://") {
@@ -873,6 +853,14 @@ impl<'a> Handler<'a> {
         if !Path::new(file).exists() && file == "test" {
             // TODO: add time info in the test file
             content = vec![83, 51, 82, 83, 32, 116, 101, 115, 116, 10]; // S3RS test/n
+            let _ = match self.auth_type {
+                AuthType::AWS4 => {
+                    self.aws_v4_request("PUT", None, &uri, &Vec::new(), &Vec::new(), content)
+                }
+                AuthType::AWS2 => {
+                    self.aws_v2_request("PUT", &uri, &Vec::new(), &Vec::new(), &content)
+                }
+            };
         } else {
             let file_size = match metadata(Path::new(file)) {
                 Ok(m) => m.len(),
@@ -1019,26 +1007,22 @@ impl<'a> Handler<'a> {
                             ));
                         }
                         content.push_str(&format!("</CompleteMultipartUpload>"));
-                        match self.auth_type {
-                            AuthType::AWS4 => {
-                                self.aws_v4_request(
-                                    "POST",
-                                    None,
-                                    &uri,
-                                    &vec![("uploadId", upload_id.as_str())],
-                                    &Vec::new(),
-                                    content.into_bytes(),
-                                );
-                            }
-                            AuthType::AWS2 => {
-                                self.aws_v2_request(
-                                    "POST",
-                                    &uri,
-                                    &vec![("uploadId", upload_id.as_str())],
-                                    &Vec::new(),
-                                    &content.into_bytes(),
-                                );
-                            }
+                        let _ = match self.auth_type {
+                            AuthType::AWS4 => self.aws_v4_request(
+                                "POST",
+                                None,
+                                &uri,
+                                &vec![("uploadId", upload_id.as_str())],
+                                &Vec::new(),
+                                content.into_bytes(),
+                            ),
+                            AuthType::AWS2 => self.aws_v2_request(
+                                "POST",
+                                &uri,
+                                &vec![("uploadId", upload_id.as_str())],
+                                &Vec::new(),
+                                &content.into_bytes(),
+                            ),
                         };
                         info!("complete multipart");
                         break;
@@ -1051,12 +1035,12 @@ impl<'a> Handler<'a> {
                     Err(_) => return Err("input file open error"),
                 };
                 let _ = fin.read_to_end(&mut content);
-                match self.auth_type {
+                let _ = match self.auth_type {
                     AuthType::AWS4 => {
-                        self.aws_v4_request("PUT", None, &uri, &Vec::new(), &Vec::new(), content);
+                        self.aws_v4_request("PUT", None, &uri, &Vec::new(), &Vec::new(), content)
                     }
                     AuthType::AWS2 => {
-                        self.aws_v2_request("PUT", &uri, &Vec::new(), &Vec::new(), &content);
+                        self.aws_v2_request("PUT", &uri, &Vec::new(), &Vec::new(), &content)
                     }
                 };
             };
@@ -1230,7 +1214,7 @@ impl<'a> Handler<'a> {
             }
         }
 
-        match self.auth_type {
+        let _ = match self.auth_type {
             AuthType::AWS4 => self.aws_v4_request(
                 "DELETE",
                 virtural_host,
@@ -1262,12 +1246,12 @@ impl<'a> Handler<'a> {
         }
         let mut uri = String::from_str("/").unwrap();
         uri.push_str(bucket);
-        match self.auth_type {
+        let _ = match self.auth_type {
             AuthType::AWS4 => {
-                self.aws_v4_request("PUT", None, &uri, &Vec::new(), &Vec::new(), Vec::new());
+                self.aws_v4_request("PUT", None, &uri, &Vec::new(), &Vec::new(), Vec::new())
             }
             AuthType::AWS2 => {
-                self.aws_v2_request("PUT", &uri, &Vec::new(), &Vec::new(), &Vec::new());
+                self.aws_v2_request("PUT", &uri, &Vec::new(), &Vec::new(), &Vec::new())
             }
         };
         Ok(())
@@ -1280,12 +1264,12 @@ impl<'a> Handler<'a> {
         }
         let mut uri = String::from_str("/").unwrap();
         uri.push_str(bucket);
-        match self.auth_type {
+        let _ = match self.auth_type {
             AuthType::AWS4 => {
-                self.aws_v4_request("DELETE", None, &uri, &Vec::new(), &Vec::new(), Vec::new());
+                self.aws_v4_request("DELETE", None, &uri, &Vec::new(), &Vec::new(), Vec::new())
             }
             AuthType::AWS2 => {
-                self.aws_v2_request("DELETE", &uri, &Vec::new(), &Vec::new(), &Vec::new());
+                self.aws_v2_request("DELETE", &uri, &Vec::new(), &Vec::new(), &Vec::new())
             }
         };
         Ok(())
@@ -1394,27 +1378,23 @@ impl<'a> Handler<'a> {
         debug!("payload: {:?}", content);
 
         let query_string = vec![("tagging", "")];
-        match self.auth_type {
-            AuthType::AWS4 => {
-                self.aws_v4_request(
-                    "PUT",
-                    virtural_host,
-                    &uri,
-                    &query_string,
-                    &Vec::new(),
-                    content.into_bytes(),
-                );
-            }
-            AuthType::AWS2 => {
-                self.aws_v2_request(
-                    "PUT",
-                    &format!("/{}{}", &caps["bucket"], &caps["object"]),
-                    &query_string,
-                    &Vec::new(),
-                    &content.into_bytes(),
-                );
-            }
-        }
+        let _ = match self.auth_type {
+            AuthType::AWS4 => self.aws_v4_request(
+                "PUT",
+                virtural_host,
+                &uri,
+                &query_string,
+                &Vec::new(),
+                content.into_bytes(),
+            ),
+            AuthType::AWS2 => self.aws_v2_request(
+                "PUT",
+                &format!("/{}{}", &caps["bucket"], &caps["object"]),
+                &query_string,
+                &Vec::new(),
+                &content.into_bytes(),
+            ),
+        };
         Ok(())
     }
 
@@ -1447,34 +1427,30 @@ impl<'a> Handler<'a> {
         }
 
         let query_string = vec![("tagging", "")];
-        match self.auth_type {
-            AuthType::AWS4 => {
-                self.aws_v4_request(
-                    "DELETE",
-                    virtural_host,
-                    &uri,
-                    &query_string,
-                    &Vec::new(),
-                    Vec::new(),
-                );
-            }
-            AuthType::AWS2 => {
-                self.aws_v2_request(
-                    "DELETE",
-                    &format!("/{}{}", &caps["bucket"], &caps["object"]),
-                    &query_string,
-                    &Vec::new(),
-                    &Vec::new(),
-                );
-            }
-        }
+        let _ = match self.auth_type {
+            AuthType::AWS4 => self.aws_v4_request(
+                "DELETE",
+                virtural_host,
+                &uri,
+                &query_string,
+                &Vec::new(),
+                Vec::new(),
+            ),
+            AuthType::AWS2 => self.aws_v2_request(
+                "DELETE",
+                &format!("/{}{}", &caps["bucket"], &caps["object"]),
+                &query_string,
+                &Vec::new(),
+                &Vec::new(),
+            ),
+        };
         Ok(())
     }
 
     /// Show the usage of a bucket (CEPH only)
     pub fn usage(&self, target: &str, options: &Vec<(&str, &str)>) -> Result<(), &'static str> {
         let re = Regex::new(S3_FORMAT).unwrap();
-        let mut uri = format!("/admin/bucket");
+        let uri = format!("/admin/bucket");
         let caps = match re.captures(target) {
             Some(c) => c,
             None => return Err("S3 format error."),
