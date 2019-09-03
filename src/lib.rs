@@ -9,7 +9,7 @@
 //!     s3_type: None, // default will try to config as AWS S3 handler
 //! };
 //! let handler = s3handler::Handler::init_from_config(&config);
-//! let _ = handler.ls();
+//! let _ = handler.la();
 //! ```
 #[macro_use]
 extern crate log;
