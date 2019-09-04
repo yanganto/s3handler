@@ -16,7 +16,9 @@ extern crate log;
 #[macro_use]
 extern crate serde_derive;
 extern crate colored;
+extern crate url;
 
+use std::convert::From;
 use std::fs::{metadata, write, File};
 use std::io::prelude::*;
 use std::path::Path;
@@ -28,11 +30,10 @@ use quick_xml::Reader;
 use regex::Regex;
 use reqwest::{header, Client, Response};
 use serde_json;
+use url::Url;
 
 mod aws;
 
-static S3_FORMAT: &'static str =
-    r#"[sS]3://(?P<bucket>[A-Za-z0-9\-\._]+)(?P<object>[A-Za-z0-9\-\._/]*)"#;
 static RESPONSE_FORMAT: &'static str = r#""Contents":\["([A-Za-z0-9\-\._]+?)"(.*?)\]"#;
 
 /// # The struct for credential config for each S3 cluster
@@ -119,6 +120,115 @@ pub struct Handler<'a> {
     pub region: Option<String>,
 }
 
+/// # Flexible S3 format parser
+/// - bucket - the objeck belonge to which
+/// - key - the object key
+/// - etag - the etag calculated by server (MD5 in general)
+/// - storage_class - the storage class of this object
+/// - mtime - the last modified time
+/// ```
+/// use s3handler::{S3Object, S3Convert};
+///
+/// let s3_object = S3Object::from("s3://bucket/objeckt_key".to_string());
+/// assert_eq!(s3_object.bucket, "bucket".to_string());
+/// assert_eq!(s3_object.key, Some("/objeckt_key".to_string()));
+/// assert_eq!("s3://bucket/objeckt_key".to_string(), String::from(s3_object));
+///
+/// let s3_object: S3Object = S3Convert::new_from_uri("/bucket/objeckt_key".to_string());
+/// assert_eq!("s3://bucket/objeckt_key".to_string(), String::from(s3_object));
+/// ```
+#[derive(Debug)]
+pub struct S3Object {
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub etag: Option<String>,
+    pub storage_class: Option<String>,
+    pub mtime: Option<String>,
+}
+
+impl From<String> for S3Object {
+    fn from(s3_path: String) -> Self {
+        let url_parser = Url::parse(&s3_path).unwrap();
+        match url_parser.path() {
+            "/" => S3Object {
+                bucket: Some(url_parser.host().unwrap().to_string()),
+                key: None,
+                etag: None,
+                storage_class: None,
+                mtime: None,
+            },
+            _ => S3Object {
+                bucket: Some(url_parser.host().unwrap().to_string()),
+                key: Some(url_parser.path().to_string()),
+                etag: None,
+                storage_class: None,
+                mtime: None,
+            },
+        }
+    }
+}
+
+impl From<S3Object> for String {
+    fn from(s3_object: S3Object) -> Self {
+        match s3_object.bucket {
+            Some(b) => match s3_object.key {
+                Some(k) => format!("s3://{}{}", b, k),
+                None => format!("s3://{}", b),
+            },
+            None => format!("s3://"),
+        }
+    }
+}
+
+pub trait S3Convert {
+    fn virtural_host_style_links(&self, host: String) -> (String, String);
+    fn path_style_links(&self, host: String) -> (String, String);
+    fn new_from_uri(path: String) -> Self;
+}
+
+impl S3Convert for S3Object {
+    fn virtural_host_style_links(&self, host: String) -> (String, String) {
+        match self.bucket.clone() {
+            Some(b) => (
+                format!("{}.{}", b, host),
+                self.key.clone().unwrap_or("/".to_string()),
+            ),
+            None => (host, "/".to_string()),
+        }
+    }
+    fn path_style_links(&self, host: String) -> (String, String) {
+        match self.bucket.clone() {
+            Some(b) => (
+                host,
+                format!("/{}{}", b, self.key.clone().unwrap_or("/".to_string())),
+            ),
+            None => (host, "/".to_string()),
+        }
+    }
+    fn new_from_uri(uri: String) -> S3Object {
+        let re = Regex::new(r#"/?(?P<bucket>[A-Za-z0-9\-\._]+)(?P<object>[A-Za-z0-9\-\._/]*)\s*"#)
+            .unwrap();
+        let caps = re.captures(&uri).expect("S3 object uri format error.");
+        if &caps["object"] == "" || &caps["object"] == "/" {
+            S3Object {
+                bucket: Some(caps["bucket"].to_string()),
+                key: None,
+                etag: None,
+                storage_class: None,
+                mtime: None,
+            }
+        } else {
+            S3Object {
+                bucket: Some(caps["bucket"].to_string()),
+                key: Some(caps["object"].to_string()),
+                etag: None,
+                storage_class: None,
+                mtime: None,
+            }
+        }
+    }
+}
+
 trait ResponseHandler {
     fn handle_response(&mut self) -> (Vec<u8>, reqwest::header::HeaderMap);
 }
@@ -150,7 +260,7 @@ impl<'a> Handler<'a> {
     fn aws_v2_request(
         &self,
         method: &str,
-        uri: &str,
+        s3_object: &S3Object,
         qs: &Vec<(&str, &str)>,
         insert_headers: &Vec<(&str, &str)>,
         payload: &Vec<u8>,
@@ -196,13 +306,24 @@ impl<'a> Handler<'a> {
         query_strings.extend(qs.iter().cloned());
 
         let mut query = String::from_str("http://").unwrap();
-        query.push_str(self.host);
-        query.push_str(uri);
+        let links;
+        match self.url_style {
+            UrlStyle::HOST => {
+                links = s3_object.virtural_host_style_links(self.host.to_string());
+                query.push_str(&links.0);
+                query.push_str(&links.1);
+            }
+            UrlStyle::PATH => {
+                links = s3_object.path_style_links(self.host.to_string());
+                query.push_str(self.host);
+                query.push_str(&links.1);
+            }
+        }
         query.push('?');
         query.push_str(&aws::canonical_query_string(&mut query_strings));
         let signature = aws::aws_s3_v2_sign(
             self.secret_key,
-            &aws::aws_s3_v2_get_string_to_signed(method, uri, &mut signed_headers, payload),
+            &aws::aws_s3_v2_get_string_to_signed(method, &links.1, &mut signed_headers, payload),
         );
         let mut authorize_string = String::from_str("AWS ").unwrap();
         authorize_string.push_str(self.access_key);
@@ -242,8 +363,7 @@ impl<'a> Handler<'a> {
     fn _aws_v4_request(
         &self,
         method: &str,
-        virtural_host: Option<String>,
-        uri: &str,
+        s3_object: &S3Object,
         qs: &Vec<(&str, &str)>,
         insert_headers: &Vec<(&str, &str)>,
         payload: Vec<u8>,
@@ -258,18 +378,14 @@ impl<'a> Handler<'a> {
         let payload_hash = aws::hash_payload(&payload);
         headers.insert("x-amz-content-sha256", payload_hash.parse().unwrap());
 
+        let links = match self.url_style {
+            UrlStyle::HOST => s3_object.virtural_host_style_links(self.host.to_string()),
+            UrlStyle::PATH => s3_object.path_style_links(self.host.to_string()),
+        };
         // follow the endpoint from http redirect first
         let hostname = match endpoint {
             Some(ep) => ep,
-            None => match virtural_host {
-                Some(vs) => {
-                    let mut host = vs;
-                    host.push_str(".");
-                    host.push_str(self.host);
-                    host
-                }
-                None => self.host.to_string(),
-            },
+            None => links.0,
         };
 
         let insert_headers_name: Vec<String> = insert_headers
@@ -309,16 +425,16 @@ impl<'a> Handler<'a> {
         }
         query_strings.extend(qs.iter().cloned());
 
-        let mut query = String::from_str("http://").unwrap();
+        let mut query = String::from_str("http://").unwrap(); // TODO SSL as config
         query.push_str(hostname.as_str());
-        query.push_str(uri);
+        query.push_str(links.1.as_str());
         query.push('?');
         query.push_str(&aws::canonical_query_string(&mut query_strings));
         let signature = aws::aws_v4_sign(
             self.secret_key,
             aws::aws_v4_get_string_to_signed(
                 method,
-                uri,
+                links.1.as_str(),
                 &mut query_strings,
                 &mut signed_headers,
                 &payload,
@@ -412,8 +528,7 @@ impl<'a> Handler<'a> {
                         }
                         self._aws_v4_request(
                             method,
-                            None,
-                            uri,
+                            s3_object,
                             qs,
                             insert_headers,
                             payload,
@@ -436,16 +551,14 @@ impl<'a> Handler<'a> {
     fn aws_v4_request(
         &self,
         method: &str,
-        virtural_host: Option<String>,
-        uri: &str,
+        s3_object: &S3Object,
         qs: &Vec<(&str, &str)>,
         headers: &Vec<(&str, &str)>,
         payload: Vec<u8>,
     ) -> Result<(Vec<u8>, reqwest::header::HeaderMap), &'static str> {
         self._aws_v4_request(
             method,
-            virtural_host,
-            uri,
+            s3_object,
             qs,
             headers,
             payload,
@@ -457,17 +570,18 @@ impl<'a> Handler<'a> {
     /// List all objects in a bucket
     pub fn la(&self) -> Result<(), &'static str> {
         let re = Regex::new(RESPONSE_FORMAT).unwrap();
+        let s3_object = S3Object::from("s3://".to_string());
         let mut res = match self.auth_type {
             AuthType::AWS4 => std::str::from_utf8(
                 &self
-                    .aws_v4_request("GET", None, "/", &Vec::new(), &Vec::new(), Vec::new())?
+                    .aws_v4_request("GET", &s3_object, &Vec::new(), &Vec::new(), Vec::new())?
                     .0,
             )
             .unwrap_or("")
             .to_string(),
             AuthType::AWS2 => std::str::from_utf8(
                 &self
-                    .aws_v2_request("GET", "/", &Vec::new(), &Vec::new(), &Vec::new())?
+                    .aws_v2_request("GET", &s3_object, &Vec::new(), &Vec::new(), &Vec::new())?
                     .0,
             )
             .unwrap_or("")
@@ -516,38 +630,24 @@ impl<'a> Handler<'a> {
         }
         for bucket in buckets {
             let bucket_prefix = format!("s3://{}", bucket.as_str());
+            let s3_object = S3Object::from(format!("s3://{}", bucket));
             match self.auth_type {
                 AuthType::AWS4 => {
-                    res = match self.url_style {
-                        UrlStyle::PATH => std::str::from_utf8(
-                            &self
-                                .aws_v4_request(
-                                    "GET",
-                                    None,
-                                    &format!("/{}", bucket.as_str()),
-                                    &Vec::new(),
-                                    &Vec::new(),
-                                    Vec::new(),
-                                )?
-                                .0,
-                        )
-                        .unwrap_or("")
-                        .to_string(),
-                        UrlStyle::HOST => std::str::from_utf8(
-                            &self
-                                .aws_v4_request(
-                                    "GET",
-                                    Some(bucket),
-                                    "/",
-                                    &Vec::new(),
-                                    &Vec::new(),
-                                    Vec::new(),
-                                )?
-                                .0,
-                        )
-                        .unwrap_or("")
-                        .to_string(),
-                    };
+                    res = std::str::from_utf8(
+                        &self
+                            .aws_v4_request(
+                                "GET",
+                                &s3_object,
+                                &Vec::new(),
+                                &Vec::new(),
+                                Vec::new(),
+                            )?
+                            .0,
+                    )
+                    .unwrap_or("")
+                    .to_string();
+
+                    // TODO: retrun S3Objects here
                     match self.format {
                         Format::JSON => {
                             for cap in re.captures_iter(&res) {
@@ -598,7 +698,7 @@ impl<'a> Handler<'a> {
                         &self
                             .aws_v2_request(
                                 "GET",
-                                &format!("/{}", bucket.as_str()),
+                                &s3_object,
                                 &Vec::new(),
                                 &Vec::new(),
                                 &Vec::new(),
@@ -662,31 +762,14 @@ impl<'a> Handler<'a> {
         let res: String;
         match bucket {
             Some(b) => {
-                let uri: String;
-                let mut re = Regex::new(S3_FORMAT).unwrap();
-                let mut vitural_host = None;
-                if b.starts_with("s3://") || b.starts_with("S3://") {
-                    let caps = re.captures(b).expect("S3 object format error.");
-                    match self.url_style {
-                        UrlStyle::PATH => {
-                            uri = format!("/{}", &caps["bucket"]);
-                        }
-                        UrlStyle::HOST => {
-                            vitural_host = Some(format!("{}", &caps["bucket"]));
-                            uri = "/".to_string();
-                        }
-                    }
-                } else {
-                    uri = format!("/{}", b);
-                }
+                let s3_object = S3Object::from(b.to_string());
                 match self.auth_type {
                     AuthType::AWS4 => {
                         res = std::str::from_utf8(
                             &self
                                 .aws_v4_request(
                                     "GET",
-                                    vitural_host.clone(),
-                                    &uri,
+                                    &s3_object,
                                     &Vec::new(),
                                     &Vec::new(),
                                     Vec::new(),
@@ -699,7 +782,13 @@ impl<'a> Handler<'a> {
                     AuthType::AWS2 => {
                         res = std::str::from_utf8(
                             &self
-                                .aws_v2_request("GET", &uri, &Vec::new(), &Vec::new(), &Vec::new())?
+                                .aws_v2_request(
+                                    "GET",
+                                    &s3_object,
+                                    &Vec::new(),
+                                    &Vec::new(),
+                                    &Vec::new(),
+                                )?
                                 .0,
                         )
                         .unwrap_or("")
@@ -707,10 +796,11 @@ impl<'a> Handler<'a> {
                     }
                 }
                 match self.format {
+                    // TODO return s3 object  vector
                     Format::JSON => {
-                        re = Regex::new(RESPONSE_FORMAT).unwrap();
+                        let re = Regex::new(RESPONSE_FORMAT).unwrap();
                         for cap in re.captures_iter(&res) {
-                            println!("s3:/{}/{}", uri, &cap[1]);
+                            println!("s3://{}/{}", b, &cap[1]);
                         }
                     }
                     Format::XML => {
@@ -733,8 +823,8 @@ impl<'a> Handler<'a> {
                                 Ok(Event::Text(e)) => {
                                     if in_key_tag {
                                         println!(
-                                            "s3://{}/{} ",
-                                            vitural_host.clone().unwrap_or(uri.to_string()),
+                                            "s3://{}/{}",
+                                            b,
                                             e.unescape_and_decode(&reader).unwrap()
                                         )
                                     }
@@ -753,14 +843,14 @@ impl<'a> Handler<'a> {
                 }
             }
             None => {
+                let s3_object = S3Object::from("s3://".to_string());
                 match self.auth_type {
                     AuthType::AWS4 => {
                         res = std::str::from_utf8(
                             &self
                                 .aws_v4_request(
                                     "GET",
-                                    None,
-                                    "/",
+                                    &s3_object,
                                     &Vec::new(),
                                     &Vec::new(),
                                     Vec::new(),
@@ -773,7 +863,13 @@ impl<'a> Handler<'a> {
                     AuthType::AWS2 => {
                         res = std::str::from_utf8(
                             &self
-                                .aws_v2_request("GET", "/", &Vec::new(), &Vec::new(), &Vec::new())?
+                                .aws_v2_request(
+                                    "GET",
+                                    &s3_object,
+                                    &Vec::new(),
+                                    &Vec::new(),
+                                    &Vec::new(),
+                                )?
                                 .0,
                         )
                         .unwrap_or("")
@@ -833,32 +929,29 @@ impl<'a> Handler<'a> {
 
     /// Upload a file to a S3 bucket
     pub fn put(&self, file: &str, dest: &str) -> Result<(), &'static str> {
+        // TODO: handle XCOPY
         if file == "" || dest == "" {
             return Err("please specify the file and the destiney");
         }
-        let re = Regex::new(S3_FORMAT).unwrap();
-        let caps = match re.captures(dest) {
-            Some(c) => c,
-            None => return Err("S3 object format error."),
-        };
+
+        let mut s3_object = S3Object::from(dest.to_string());
+
         let mut content: Vec<u8>;
 
-        let uri = if &caps["object"] == "" || &caps["object"] == "/" {
+        if s3_object.key.is_none() {
             let file_name = Path::new(file).file_name().unwrap().to_string_lossy();
-            format!("/{}/{}", &caps["bucket"], file_name)
-        } else {
-            format!("/{}{}", &caps["bucket"], &caps["object"])
-        };
+            s3_object.key = Some(format!("/{}", file_name));
+        }
 
         if !Path::new(file).exists() && file == "test" {
             // TODO: add time info in the test file
             content = vec![83, 51, 82, 83, 32, 116, 101, 115, 116, 10]; // S3RS test/n
             let _ = match self.auth_type {
                 AuthType::AWS4 => {
-                    self.aws_v4_request("PUT", None, &uri, &Vec::new(), &Vec::new(), content)
+                    self.aws_v4_request("PUT", &s3_object, &Vec::new(), &Vec::new(), content)
                 }
                 AuthType::AWS2 => {
-                    self.aws_v2_request("PUT", &uri, &Vec::new(), &Vec::new(), &content)
+                    self.aws_v2_request("PUT", &s3_object, &Vec::new(), &Vec::new(), &content)
                 }
             };
         } else {
@@ -878,8 +971,7 @@ impl<'a> Handler<'a> {
                         &self
                             .aws_v4_request(
                                 "POST",
-                                None,
-                                &uri,
+                                &s3_object,
                                 &vec![("uploads", "")],
                                 &Vec::new(),
                                 Vec::new(),
@@ -892,7 +984,7 @@ impl<'a> Handler<'a> {
                         &self
                             .aws_v2_request(
                                 "POST",
-                                &uri,
+                                &s3_object,
                                 &vec![("uploads", "")],
                                 &Vec::new(),
                                 &Vec::new(),
@@ -967,8 +1059,7 @@ impl<'a> Handler<'a> {
                         AuthType::AWS4 => {
                             self.aws_v4_request(
                                 "PUT",
-                                None,
-                                &uri,
+                                &s3_object,
                                 &vec![
                                     ("uploadId", upload_id.as_str()),
                                     ("partNumber", part.to_string().as_str()),
@@ -981,7 +1072,7 @@ impl<'a> Handler<'a> {
                         AuthType::AWS2 => {
                             self.aws_v2_request(
                                 "PUT",
-                                &uri,
+                                &s3_object,
                                 &vec![
                                     ("uploadId", upload_id.as_str()),
                                     ("partNumber", part.to_string().as_str()),
@@ -1010,15 +1101,14 @@ impl<'a> Handler<'a> {
                         let _ = match self.auth_type {
                             AuthType::AWS4 => self.aws_v4_request(
                                 "POST",
-                                None,
-                                &uri,
+                                &s3_object,
                                 &vec![("uploadId", upload_id.as_str())],
                                 &Vec::new(),
                                 content.into_bytes(),
                             ),
                             AuthType::AWS2 => self.aws_v2_request(
                                 "POST",
-                                &uri,
+                                &s3_object,
                                 &vec![("uploadId", upload_id.as_str())],
                                 &Vec::new(),
                                 &content.into_bytes(),
@@ -1037,10 +1127,10 @@ impl<'a> Handler<'a> {
                 let _ = fin.read_to_end(&mut content);
                 let _ = match self.auth_type {
                     AuthType::AWS4 => {
-                        self.aws_v4_request("PUT", None, &uri, &Vec::new(), &Vec::new(), content)
+                        self.aws_v4_request("PUT", &s3_object, &Vec::new(), &Vec::new(), content)
                     }
                     AuthType::AWS2 => {
-                        self.aws_v2_request("PUT", &uri, &Vec::new(), &Vec::new(), &content)
+                        self.aws_v2_request("PUT", &s3_object, &Vec::new(), &Vec::new(), &content)
                     }
                 };
             };
@@ -1050,16 +1140,10 @@ impl<'a> Handler<'a> {
 
     /// Download an object from S3 service
     pub fn get(&self, src: &str, file: Option<&str>) -> Result<(), &'static str> {
-        if src == "" {
-            return Err("Please specify the object");
+        let s3_object = S3Object::from(src.to_string());
+        if s3_object.key.is_none() {
+            return Err("Please specific the object");
         }
-        let re = Regex::new(S3_FORMAT).unwrap();
-        let mut virtural_host = None;
-        let uri: String;
-        let caps = match re.captures(src) {
-            Some(c) => c,
-            None => return Err("S3 object format error."),
-        };
 
         let fout = match file {
             Some(fname) => fname,
@@ -1070,32 +1154,12 @@ impl<'a> Handler<'a> {
                 .unwrap_or("s3download"),
         };
 
-        if &caps["object"] == "" {
-            return Err("Please specific the object");
-        }
-
         match self.auth_type {
             AuthType::AWS4 => {
-                match self.url_style {
-                    UrlStyle::PATH => {
-                        uri = format!("/{}{}", &caps["bucket"], &caps["object"]);
-                    }
-                    UrlStyle::HOST => {
-                        virtural_host = Some(format!("{}", &caps["bucket"]));
-                        uri = format!("{}", &caps["object"]);
-                    }
-                }
                 match write(
                     fout,
-                    self.aws_v4_request(
-                        "GET",
-                        virtural_host,
-                        &uri,
-                        &Vec::new(),
-                        &Vec::new(),
-                        Vec::new(),
-                    )?
-                    .0,
+                    self.aws_v4_request("GET", &s3_object, &Vec::new(), &Vec::new(), Vec::new())?
+                        .0,
                 ) {
                     Ok(_) => return Ok(()),
                     Err(_) => return Err("write file error"), //XXX
@@ -1104,14 +1168,8 @@ impl<'a> Handler<'a> {
             AuthType::AWS2 => {
                 match write(
                     fout,
-                    self.aws_v2_request(
-                        "GET",
-                        &format!("/{}{}", &caps["bucket"], &caps["object"]),
-                        &Vec::new(),
-                        &Vec::new(),
-                        &Vec::new(),
-                    )?
-                    .0,
+                    self.aws_v2_request("GET", &s3_object, &Vec::new(), &Vec::new(), &Vec::new())?
+                        .0,
                 ) {
                     Ok(_) => return Ok(()),
                     Err(_) => return Err("write file error"), //XXX
@@ -1122,40 +1180,14 @@ impl<'a> Handler<'a> {
 
     /// Show an object's content, this method is use for quick check a small object on the fly
     pub fn cat(&self, src: &str) -> Result<(), &'static str> {
-        if src == "" {
-            return Err("please specific the object");
-        }
-        let re = Regex::new(S3_FORMAT).unwrap();
-        let mut virtural_host = None;
-        let uri: String;
-        let caps = match re.captures(src) {
-            Some(c) => c,
-            None => return Err("S3 object format error."),
-        };
-
-        if &caps["object"] == "" {
+        let s3_object = S3Object::from(src.to_string());
+        if s3_object.key.is_none() {
             return Err("Please specific the object");
         }
 
         match self.auth_type {
             AuthType::AWS4 => {
-                match self.url_style {
-                    UrlStyle::PATH => {
-                        uri = format!("/{}{}", &caps["bucket"], &caps["object"]);
-                    }
-                    UrlStyle::HOST => {
-                        virtural_host = Some(format!("{}", &caps["bucket"]));
-                        uri = format!("{}", &caps["object"]);
-                    }
-                }
-                match self.aws_v4_request(
-                    "GET",
-                    virtural_host,
-                    &uri,
-                    &Vec::new(),
-                    &Vec::new(),
-                    Vec::new(),
-                ) {
+                match self.aws_v4_request("GET", &s3_object, &Vec::new(), &Vec::new(), Vec::new()) {
                     Ok(r) => {
                         println!("{}", std::str::from_utf8(&r.0).unwrap_or(""));
                         return Ok(());
@@ -1164,13 +1196,8 @@ impl<'a> Handler<'a> {
                 }
             }
             AuthType::AWS2 => {
-                match self.aws_v2_request(
-                    "GET",
-                    &format!("/{}{}", &caps["bucket"], &caps["object"]),
-                    &Vec::new(),
-                    &Vec::new(),
-                    &Vec::new(),
-                ) {
+                match self.aws_v2_request("GET", &s3_object, &Vec::new(), &Vec::new(), &Vec::new())
+                {
                     Ok(r) => {
                         println!("{}", std::str::from_utf8(&r.0).unwrap_or(""));
                         return Ok(());
@@ -1190,46 +1217,17 @@ impl<'a> Handler<'a> {
         headers: &Vec<(&str, &str)>,
     ) -> Result<(), &'static str> {
         debug!("headers: {:?}", headers);
-        if src == "" {
-            return Err("please specific the object");
-        }
-        let re = Regex::new(S3_FORMAT).unwrap();
-        let mut virtural_host = None;
-        let uri: String;
-        let caps = match re.captures(src) {
-            Some(c) => c,
-            None => return Err("S3 object format error."),
-        };
-
-        if &caps["object"] == "" {
+        let s3_object = S3Object::from(src.to_string());
+        if s3_object.key.is_none() {
             return Err("Please specific the object");
         }
-        match self.url_style {
-            UrlStyle::PATH => {
-                uri = format!("/{}{}", &caps["bucket"], &caps["object"]);
-            }
-            UrlStyle::HOST => {
-                virtural_host = Some(format!("{}", &caps["bucket"]));
-                uri = format!("{}", &caps["object"]);
-            }
-        }
-
         let _ = match self.auth_type {
-            AuthType::AWS4 => self.aws_v4_request(
-                "DELETE",
-                virtural_host,
-                &uri,
-                &Vec::new(),
-                headers,
-                Vec::new(),
-            ),
-            AuthType::AWS2 => self.aws_v2_request(
-                "GET",
-                &format!("/{}{}", &caps["bucket"], &caps["object"]),
-                &Vec::new(),
-                headers,
-                &Vec::new(),
-            ),
+            AuthType::AWS4 => {
+                self.aws_v4_request("DELETE", &s3_object, &Vec::new(), headers, Vec::new())
+            }
+            AuthType::AWS2 => {
+                self.aws_v2_request("GET", &s3_object, &Vec::new(), headers, &Vec::new())
+            }
         };
         Ok(())
     }
@@ -1241,17 +1239,16 @@ impl<'a> Handler<'a> {
 
     /// Make a new bucket
     pub fn mb(&self, bucket: &str) -> Result<(), &'static str> {
-        if bucket == "" {
+        let s3_object = S3Object::from(bucket.to_string());
+        if s3_object.bucket.is_none() {
             return Err("please specific the bucket name");
         }
-        let mut uri = String::from_str("/").unwrap();
-        uri.push_str(bucket);
         let _ = match self.auth_type {
             AuthType::AWS4 => {
-                self.aws_v4_request("PUT", None, &uri, &Vec::new(), &Vec::new(), Vec::new())
+                self.aws_v4_request("PUT", &s3_object, &Vec::new(), &Vec::new(), Vec::new())
             }
             AuthType::AWS2 => {
-                self.aws_v2_request("PUT", &uri, &Vec::new(), &Vec::new(), &Vec::new())
+                self.aws_v2_request("PUT", &s3_object, &Vec::new(), &Vec::new(), &Vec::new())
             }
         };
         Ok(())
@@ -1259,17 +1256,16 @@ impl<'a> Handler<'a> {
 
     /// Remove a bucket
     pub fn rb(&self, bucket: &str) -> Result<(), &'static str> {
-        if bucket == "" {
+        let s3_object = S3Object::from(bucket.to_string());
+        if s3_object.bucket.is_none() {
             return Err("please specific the bucket name");
         }
-        let mut uri = String::from_str("/").unwrap();
-        uri.push_str(bucket);
         let _ = match self.auth_type {
             AuthType::AWS4 => {
-                self.aws_v4_request("DELETE", None, &uri, &Vec::new(), &Vec::new(), Vec::new())
+                self.aws_v4_request("DELETE", &s3_object, &Vec::new(), &Vec::new(), Vec::new())
             }
             AuthType::AWS2 => {
-                self.aws_v2_request("DELETE", &uri, &Vec::new(), &Vec::new(), &Vec::new())
+                self.aws_v2_request("DELETE", &s3_object, &Vec::new(), &Vec::new(), &Vec::new())
             }
         };
         Ok(())
@@ -1279,56 +1275,22 @@ impl<'a> Handler<'a> {
     pub fn list_tag(&self, target: &str) -> Result<(), &'static str> {
         let res: String;
         debug!("target: {:?}", target);
-        if target == "" {
-            return Err("please specific the object");
-        }
-        let re = Regex::new(S3_FORMAT).unwrap();
-        let mut virtural_host = None;
-        let uri: String;
-        let caps = match re.captures(target) {
-            Some(c) => c,
-            None => return Err("S3 object format error."),
-        };
-
-        if &caps["object"] == "" {
+        let s3_object = S3Object::from(target.to_string());
+        if s3_object.key.is_none() {
             return Err("Please specific the object");
         }
-
-        match self.url_style {
-            UrlStyle::PATH => {
-                uri = format!("/{}{}", &caps["bucket"], &caps["object"]);
-            }
-            UrlStyle::HOST => {
-                virtural_host = Some(format!("{}", &caps["bucket"]));
-                uri = format!("{}", &caps["object"]);
-            }
-        }
-
         let query_string = vec![("tagging", "")];
         res = match self.auth_type {
             AuthType::AWS4 => std::str::from_utf8(
                 &self
-                    .aws_v4_request(
-                        "GET",
-                        virtural_host,
-                        &uri,
-                        &query_string,
-                        &Vec::new(),
-                        Vec::new(),
-                    )?
+                    .aws_v4_request("GET", &s3_object, &query_string, &Vec::new(), Vec::new())?
                     .0,
             )
             .unwrap_or("")
             .to_string(),
             AuthType::AWS2 => std::str::from_utf8(
                 &self
-                    .aws_v2_request(
-                        "GET",
-                        &format!("/{}{}", &caps["bucket"], &caps["object"]),
-                        &query_string,
-                        &Vec::new(),
-                        &Vec::new(),
-                    )?
+                    .aws_v2_request("GET", &s3_object, &query_string, &Vec::new(), &Vec::new())?
                     .0,
             )
             .unwrap_or("")
@@ -1344,28 +1306,9 @@ impl<'a> Handler<'a> {
     pub fn add_tag(&self, target: &str, tags: &Vec<(&str, &str)>) -> Result<(), &'static str> {
         debug!("target: {:?}", target);
         debug!("tags: {:?}", tags);
-        if target == "" {
-            return Err("please specific the object");
-        }
-        let re = Regex::new(S3_FORMAT).unwrap();
-        let mut virtural_host = None;
-        let uri: String;
-        let caps = match re.captures(target) {
-            Some(c) => c,
-            None => return Err("S3 object format error."),
-        };
-
-        if &caps["object"] == "" {
+        let s3_object = S3Object::from(target.to_string());
+        if s3_object.key.is_none() {
             return Err("Please specific the object");
-        }
-        match self.url_style {
-            UrlStyle::PATH => {
-                uri = format!("/{}{}", &caps["bucket"], &caps["object"]);
-            }
-            UrlStyle::HOST => {
-                virtural_host = Some(format!("{}", &caps["bucket"]));
-                uri = format!("{}", &caps["object"]);
-            }
         }
         let mut content = format!("<Tagging><TagSet>");
         for tag in tags {
@@ -1381,15 +1324,14 @@ impl<'a> Handler<'a> {
         let _ = match self.auth_type {
             AuthType::AWS4 => self.aws_v4_request(
                 "PUT",
-                virtural_host,
-                &uri,
+                &s3_object,
                 &query_string,
                 &Vec::new(),
                 content.into_bytes(),
             ),
             AuthType::AWS2 => self.aws_v2_request(
                 "PUT",
-                &format!("/{}{}", &caps["bucket"], &caps["object"]),
+                &s3_object,
                 &query_string,
                 &Vec::new(),
                 &content.into_bytes(),
@@ -1401,44 +1343,18 @@ impl<'a> Handler<'a> {
     /// Remove aa tag from an object
     pub fn del_tag(&self, target: &str) -> Result<(), &'static str> {
         debug!("target: {:?}", target);
-        if target == "" {
-            return Err("please specific the object");
-        }
-        let re = Regex::new(S3_FORMAT).unwrap();
-        let mut virtural_host = None;
-        let uri: String;
-        let caps = match re.captures(target) {
-            Some(c) => c,
-            None => return Err("S3 object format error."),
-        };
-
-        if &caps["object"] == "" {
+        let s3_object = S3Object::from(target.to_string());
+        if s3_object.key.is_none() {
             return Err("Please specific the object");
         }
-
-        match self.url_style {
-            UrlStyle::PATH => {
-                uri = format!("/{}{}", &caps["bucket"], &caps["object"]);
-            }
-            UrlStyle::HOST => {
-                virtural_host = Some(format!("{}", &caps["bucket"]));
-                uri = format!("{}", &caps["object"]);
-            }
-        }
-
         let query_string = vec![("tagging", "")];
         let _ = match self.auth_type {
-            AuthType::AWS4 => self.aws_v4_request(
-                "DELETE",
-                virtural_host,
-                &uri,
-                &query_string,
-                &Vec::new(),
-                Vec::new(),
-            ),
+            AuthType::AWS4 => {
+                self.aws_v4_request("DELETE", &s3_object, &query_string, &Vec::new(), Vec::new())
+            }
             AuthType::AWS2 => self.aws_v2_request(
                 "DELETE",
-                &format!("/{}{}", &caps["bucket"], &caps["object"]),
+                &s3_object,
                 &query_string,
                 &Vec::new(),
                 &Vec::new(),
@@ -1449,22 +1365,29 @@ impl<'a> Handler<'a> {
 
     /// Show the usage of a bucket (CEPH only)
     pub fn usage(&self, target: &str, options: &Vec<(&str, &str)>) -> Result<(), &'static str> {
-        let re = Regex::new(S3_FORMAT).unwrap();
-        let uri = format!("/admin/bucket");
-        let caps = match re.captures(target) {
-            Some(c) => c,
-            None => return Err("S3 format error."),
-        };
-        let bucket = caps["bucket"].to_string();
+        let s3_admin_bucket_object = S3Convert::new_from_uri("/admin/buckets".to_string());
+        let s3_object = S3Object::from(target.to_string());
         let mut query_strings = options.clone();
+        if s3_object.bucket.is_none() {
+            return Err("S3 format error.");
+        };
+        let bucket = s3_object.bucket.unwrap();
         query_strings.push(("bucket", &bucket));
         let result = match self.auth_type {
-            AuthType::AWS4 => {
-                self.aws_v4_request("GET", None, &uri, &query_strings, &Vec::new(), Vec::new())?
-            }
-            AuthType::AWS2 => {
-                self.aws_v2_request("GET", &uri, &query_strings, &Vec::new(), &Vec::new())?
-            }
+            AuthType::AWS4 => self.aws_v4_request(
+                "GET",
+                &s3_admin_bucket_object,
+                &query_strings,
+                &Vec::new(),
+                Vec::new(),
+            )?,
+            AuthType::AWS2 => self.aws_v2_request(
+                "GET",
+                &s3_admin_bucket_object,
+                &query_strings,
+                &Vec::new(),
+                &Vec::new(),
+            )?,
         };
         match self.format {
             Format::JSON => {
@@ -1486,12 +1409,12 @@ impl<'a> Handler<'a> {
     /// Do a GET request for the specific URL
     /// This method is easily to show the configure of S3 not implemented
     pub fn url_command(&self, url: &str) -> Result<(), &'static str> {
-        let mut uri = String::new();
+        let s3_object;
         let mut raw_qs = String::new();
         let mut query_strings = Vec::new();
         match url.find('?') {
             Some(idx) => {
-                uri.push_str(&url[..idx]);
+                s3_object = S3Object::from(url[..idx].to_string());
                 raw_qs.push_str(&String::from_str(&url[idx + 1..]).unwrap());
                 for q_pair in raw_qs.split('&') {
                     match q_pair.find('=') {
@@ -1504,16 +1427,16 @@ impl<'a> Handler<'a> {
                 }
             }
             None => {
-                uri.push_str(&url);
+                s3_object = S3Object::from(url.to_string());
             }
         }
 
         let result = match self.auth_type {
             AuthType::AWS4 => {
-                self.aws_v4_request("GET", None, &uri, &query_strings, &Vec::new(), Vec::new())?
+                self.aws_v4_request("GET", &s3_object, &query_strings, &Vec::new(), Vec::new())?
             }
             AuthType::AWS2 => {
-                self.aws_v2_request("GET", &uri, &query_strings, &Vec::new(), &Vec::new())?
+                self.aws_v2_request("GET", &s3_object, &query_strings, &Vec::new(), &Vec::new())?
             }
         };
         println!("{}", std::str::from_utf8(&result.0).unwrap_or(""));
@@ -1638,5 +1561,49 @@ impl<'a> Handler<'a> {
                 region: credential.region.clone(),
             },
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_s3object_for_dummy_folder() {
+        let s3_object = S3Object::from("s3://bucket/dummy_folder/".to_string());
+        assert_eq!(s3_object.bucket, "bucket".to_string());
+        assert_eq!(s3_object.key, Some("/dummy_folder/".to_string()));
+        assert_eq!(
+            "s3://bucket/dummy_folder/".to_string(),
+            String::from(s3_object)
+        );
+    }
+    #[test]
+    fn test_s3object_for_bucket() {
+        let s3_object = S3Object::from("s3://bucket".to_string());
+        assert_eq!(s3_object.bucket, "bucket".to_string());
+        assert_eq!(s3_object.key, None);
+        assert_eq!("s3://bucket".to_string(), String::from(s3_object));
+    }
+    #[test]
+    fn test_s3object_for_dummy_folder_from_uri() {
+        let s3_object: S3Object = S3Convert::new_from_uri("/bucket/dummy_folder/".to_string());
+        assert_eq!(
+            "s3://bucket/dummy_folder/".to_string(),
+            String::from(s3_object)
+        );
+    }
+    #[test]
+    fn test_s3object_for_bucket_from_uri() {
+        let s3_object: S3Object = S3Convert::new_from_uri("/bucket".to_string());
+        assert_eq!("s3://bucket".to_string(), String::from(s3_object));
+    }
+    #[test]
+    fn test_s3object_for_slash_end_bucket_from_uri() {
+        let s3_object: S3Object = S3Convert::new_from_uri("/bucket/".to_string());
+        assert_eq!("s3://bucket".to_string(), String::from(s3_object));
+    }
+    #[test]
+    fn test_s3object_for_bucket_from_bucket_name() {
+        let s3_object: S3Object = S3Convert::new_from_uri("bucket".to_string());
+        assert_eq!("s3://bucket".to_string(), String::from(s3_object));
     }
 }
