@@ -130,7 +130,7 @@ pub struct Handler<'a> {
 /// use s3handler::{S3Object, S3Convert};
 ///
 /// let s3_object = S3Object::from("s3://bucket/objeckt_key".to_string());
-/// assert_eq!(s3_object.bucket, "bucket".to_string());
+/// assert_eq!(s3_object.bucket, Some("bucket".to_string()));
 /// assert_eq!(s3_object.key, Some("/objeckt_key".to_string()));
 /// assert_eq!("s3://bucket/objeckt_key".to_string(), String::from(s3_object));
 ///
@@ -149,16 +149,20 @@ pub struct S3Object {
 impl From<String> for S3Object {
     fn from(s3_path: String) -> Self {
         let url_parser = Url::parse(&s3_path).unwrap();
+        let bucket = match url_parser.host_str() {
+            Some(h) if h != "" => Some(h.to_string()),
+            _ => None,
+        };
         match url_parser.path() {
             "/" => S3Object {
-                bucket: Some(url_parser.host().unwrap().to_string()),
+                bucket: bucket,
                 key: None,
                 etag: None,
                 storage_class: None,
                 mtime: None,
             },
             _ => S3Object {
-                bucket: Some(url_parser.host().unwrap().to_string()),
+                bucket: bucket,
                 key: Some(url_parser.path().to_string()),
                 etag: None,
                 storage_class: None,
@@ -1569,7 +1573,7 @@ mod tests {
     #[test]
     fn test_s3object_for_dummy_folder() {
         let s3_object = S3Object::from("s3://bucket/dummy_folder/".to_string());
-        assert_eq!(s3_object.bucket, "bucket".to_string());
+        assert_eq!(s3_object.bucket, Some("bucket".to_string()));
         assert_eq!(s3_object.key, Some("/dummy_folder/".to_string()));
         assert_eq!(
             "s3://bucket/dummy_folder/".to_string(),
@@ -1579,7 +1583,7 @@ mod tests {
     #[test]
     fn test_s3object_for_bucket() {
         let s3_object = S3Object::from("s3://bucket".to_string());
-        assert_eq!(s3_object.bucket, "bucket".to_string());
+        assert_eq!(s3_object.bucket, Some("bucket".to_string()));
         assert_eq!(s3_object.key, None);
         assert_eq!("s3://bucket".to_string(), String::from(s3_object));
     }
@@ -1590,6 +1594,12 @@ mod tests {
             "s3://bucket/dummy_folder/".to_string(),
             String::from(s3_object)
         );
+    }
+    #[test]
+    fn test_s3object_for_root() {
+        let s3_object = S3Object::from("s3://".to_string());
+        assert_eq!(s3_object.bucket, None);
+        assert_eq!(s3_object.key, None);
     }
     #[test]
     fn test_s3object_for_bucket_from_uri() {
