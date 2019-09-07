@@ -34,7 +34,8 @@ use url::Url;
 
 mod aws;
 
-static RESPONSE_FORMAT: &'static str = r#""Contents":\["([A-Za-z0-9\-\._]+?)"(.*?)\]"#;
+static RESPONSE_FORMAT: &'static str =
+    r#""Contents":\["([^"]+?)","([^"]+?)","\\"([^"]+?)\\"",([^"]+?),"([^"]+?)"(.*?)\]"#;
 
 /// # The struct for credential config for each S3 cluster
 /// - host is a parameter for the server you want to link
@@ -123,9 +124,9 @@ pub struct Handler<'a> {
 /// # Flexible S3 format parser
 /// - bucket - the objeck belonge to which
 /// - key - the object key
+/// - mtime - the last modified time
 /// - etag - the etag calculated by server (MD5 in general)
 /// - storage_class - the storage class of this object
-/// - mtime - the last modified time
 /// ```
 /// use s3handler::{S3Object, S3Convert};
 ///
@@ -137,13 +138,13 @@ pub struct Handler<'a> {
 /// let s3_object: S3Object = S3Convert::new_from_uri("/bucket/objeckt_key".to_string());
 /// assert_eq!("s3://bucket/objeckt_key".to_string(), String::from(s3_object));
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct S3Object {
     pub bucket: Option<String>,
     pub key: Option<String>,
+    pub mtime: Option<String>,
     pub etag: Option<String>,
     pub storage_class: Option<String>,
-    pub mtime: Option<String>,
 }
 
 impl From<String> for S3Object {
@@ -157,16 +158,16 @@ impl From<String> for S3Object {
             "/" => S3Object {
                 bucket: bucket,
                 key: None,
+                mtime: None,
                 etag: None,
                 storage_class: None,
-                mtime: None,
             },
             _ => S3Object {
                 bucket: bucket,
                 key: Some(url_parser.path().to_string()),
+                mtime: None,
                 etag: None,
                 storage_class: None,
-                mtime: None,
             },
         }
     }
@@ -188,6 +189,13 @@ pub trait S3Convert {
     fn virtural_host_style_links(&self, host: String) -> (String, String);
     fn path_style_links(&self, host: String) -> (String, String);
     fn new_from_uri(path: String) -> Self;
+    fn new(
+        bucket: Option<String>,
+        key: Option<String>,
+        mtime: Option<String>,
+        etag: Option<String>,
+        storage_class: Option<String>,
+    ) -> Self;
 }
 
 impl S3Convert for S3Object {
@@ -217,18 +225,44 @@ impl S3Convert for S3Object {
             S3Object {
                 bucket: Some(caps["bucket"].to_string()),
                 key: None,
+                mtime: None,
                 etag: None,
                 storage_class: None,
-                mtime: None,
             }
         } else {
             S3Object {
                 bucket: Some(caps["bucket"].to_string()),
                 key: Some(caps["object"].to_string()),
+                mtime: None,
                 etag: None,
                 storage_class: None,
-                mtime: None,
             }
+        }
+    }
+    fn new(
+        bucket: Option<String>,
+        object: Option<String>,
+        mtime: Option<String>,
+        etag: Option<String>,
+        storage_class: Option<String>,
+    ) -> S3Object {
+        let key = match object {
+            None => None,
+            Some(b) => {
+                if b.starts_with("/") {
+                    Some(b)
+                } else {
+                    Some(format!("/{}", b))
+                }
+            }
+        };
+
+        S3Object {
+            bucket: bucket,
+            key: key,
+            mtime: mtime,
+            etag: etag,
+            storage_class: storage_class,
         }
     }
 }
@@ -495,6 +529,7 @@ impl<'a> Handler<'a> {
                         match self.format {
                             Format::JSON => {
                                 // Not implement, AWS response is XML, maybe ceph need this
+                                unimplemented!();
                             }
                             Format::XML => {
                                 let mut reader = Reader::from_str(&result);
@@ -572,7 +607,8 @@ impl<'a> Handler<'a> {
     }
 
     /// List all objects in a bucket
-    pub fn la(&self) -> Result<(), &'static str> {
+    pub fn la(&self) -> Result<Vec<S3Object>, &'static str> {
+        let mut output = Vec::new();
         let re = Regex::new(RESPONSE_FORMAT).unwrap();
         let s3_object = S3Object::from("s3://".to_string());
         let mut res = match self.auth_type {
@@ -594,13 +630,14 @@ impl<'a> Handler<'a> {
         let mut buckets = Vec::new();
         match self.format {
             Format::JSON => {
-                let result: serde_json::Value;
-                result = serde_json::from_str(&res).unwrap();
-                for bucket_list in result[1].as_array() {
-                    for bucket in bucket_list {
-                        buckets.push(bucket["Name"].as_str().unwrap().to_string());
-                    }
-                }
+                let result: serde_json::Value = serde_json::from_str(&res).unwrap();
+                result[1].as_array().map(|bucket_list| {
+                    buckets.extend(
+                        bucket_list
+                            .iter()
+                            .map(|b| b["Name"].as_str().unwrap().to_string()),
+                    )
+                });
             }
             Format::XML => {
                 let mut reader = Reader::from_str(&res);
@@ -633,7 +670,6 @@ impl<'a> Handler<'a> {
             }
         }
         for bucket in buckets {
-            let bucket_prefix = format!("s3://{}", bucket.as_str());
             let s3_object = S3Object::from(format!("s3://{}", bucket));
             match self.auth_type {
                 AuthType::AWS4 => {
@@ -651,37 +687,64 @@ impl<'a> Handler<'a> {
                     .unwrap_or("")
                     .to_string();
 
-                    // TODO: retrun S3Objects here
                     match self.format {
                         Format::JSON => {
-                            for cap in re.captures_iter(&res) {
-                                println!("{}/{}", bucket_prefix, &cap[1]);
-                            }
+                            output.extend(re.captures_iter(&res).map(|cap| {
+                                S3Convert::new(
+                                    Some(bucket.clone()),
+                                    Some(cap[1].to_string()),
+                                    Some(cap[2].to_string()),
+                                    Some(cap[3].to_string()),
+                                    Some(cap[5].to_string()),
+                                )
+                            }));
                         }
                         Format::XML => {
                             let mut reader = Reader::from_str(&res);
                             let mut in_key_tag = false;
+                            let mut in_mtime_tag = false;
+                            let mut in_etag_tag = false;
+                            let mut in_storage_class_tag = false;
+                            let mut key = String::new();
+                            let mut mtime = String::new();
+                            let mut etag = String::new();
+                            let mut storage_class = String::new();
                             let mut buf = Vec::new();
-
                             loop {
                                 match reader.read_event(&mut buf) {
-                                    Ok(Event::Start(ref e)) => {
-                                        if e.name() == b"Key" {
-                                            in_key_tag = true;
-                                        }
-                                    }
-                                    Ok(Event::End(ref e)) => {
-                                        if e.name() == b"Key" {
-                                            in_key_tag = false;
-                                        }
-                                    }
+                                    Ok(Event::Start(ref e)) => match e.name() {
+                                        b"Key" => in_key_tag = true,
+                                        b"LastModified" => in_mtime_tag = true,
+                                        b"ETag" => in_etag_tag = true,
+                                        b"StorageClass" => in_storage_class_tag = true,
+                                        _ => {}
+                                    },
+                                    Ok(Event::End(ref e)) => match e.name() {
+                                        b"Contents" => output.push(S3Convert::new(
+                                            Some(bucket.clone()),
+                                            Some(key.clone()),
+                                            Some(mtime.clone()),
+                                            Some(etag[1..etag.len() - 1].to_string()),
+                                            Some(storage_class.clone()),
+                                        )),
+                                        _ => {}
+                                    },
                                     Ok(Event::Text(e)) => {
                                         if in_key_tag {
-                                            println!(
-                                                "{}/{}",
-                                                bucket_prefix,
-                                                e.unescape_and_decode(&reader).unwrap()
-                                            );
+                                            key = e.unescape_and_decode(&reader).unwrap();
+                                            in_key_tag = false;
+                                        }
+                                        if in_mtime_tag {
+                                            mtime = e.unescape_and_decode(&reader).unwrap();
+                                            in_mtime_tag = false;
+                                        }
+                                        if in_etag_tag {
+                                            etag = e.unescape_and_decode(&reader).unwrap();
+                                            in_etag_tag = false;
+                                        }
+                                        if in_storage_class_tag {
+                                            storage_class = e.unescape_and_decode(&reader).unwrap();
+                                            in_storage_class_tag = false;
                                         }
                                     }
                                     Ok(Event::Eof) => break,
@@ -713,34 +776,62 @@ impl<'a> Handler<'a> {
                     .to_string();
                     match self.format {
                         Format::JSON => {
-                            for cap in re.captures_iter(&res) {
-                                println!("{}/{}", bucket_prefix, &cap[1]);
-                            }
+                            output.extend(re.captures_iter(&res).map(|cap| {
+                                S3Convert::new(
+                                    Some(bucket.clone()),
+                                    Some(cap[1].to_string()),
+                                    Some(cap[2].to_string()),
+                                    Some(cap[3].to_string()),
+                                    Some(cap[5].to_string()),
+                                )
+                            }));
                         }
                         Format::XML => {
                             let mut reader = Reader::from_str(&res);
                             let mut in_key_tag = false;
+                            let mut in_mtime_tag = false;
+                            let mut in_etag_tag = false;
+                            let mut in_storage_class_tag = false;
+                            let mut key = String::new();
+                            let mut mtime = String::new();
+                            let mut etag = String::new();
+                            let mut storage_class = String::new();
                             let mut buf = Vec::new();
-
                             loop {
                                 match reader.read_event(&mut buf) {
-                                    Ok(Event::Start(ref e)) => {
-                                        if e.name() == b"Key" {
-                                            in_key_tag = true;
-                                        }
-                                    }
-                                    Ok(Event::End(ref e)) => {
-                                        if e.name() == b"Key" {
-                                            in_key_tag = false;
-                                        }
-                                    }
+                                    Ok(Event::Start(ref e)) => match e.name() {
+                                        b"Key" => in_key_tag = true,
+                                        b"LastModified" => in_mtime_tag = true,
+                                        b"ETag" => in_etag_tag = true,
+                                        b"StorageClass" => in_storage_class_tag = true,
+                                        _ => {}
+                                    },
+                                    Ok(Event::End(ref e)) => match e.name() {
+                                        b"Contents" => output.push(S3Convert::new(
+                                            Some(bucket.clone()),
+                                            Some(key.clone()),
+                                            Some(mtime.clone()),
+                                            Some(etag[1..etag.len() - 1].to_string()),
+                                            Some(storage_class.clone()),
+                                        )),
+                                        _ => {}
+                                    },
                                     Ok(Event::Text(e)) => {
                                         if in_key_tag {
-                                            println!(
-                                                "{}/{}",
-                                                bucket_prefix,
-                                                e.unescape_and_decode(&reader).unwrap()
-                                            );
+                                            key = e.unescape_and_decode(&reader).unwrap();
+                                            in_key_tag = false;
+                                        }
+                                        if in_mtime_tag {
+                                            mtime = e.unescape_and_decode(&reader).unwrap();
+                                            in_mtime_tag = false;
+                                        }
+                                        if in_etag_tag {
+                                            etag = e.unescape_and_decode(&reader).unwrap();
+                                            in_etag_tag = false;
+                                        }
+                                        if in_storage_class_tag {
+                                            storage_class = e.unescape_and_decode(&reader).unwrap();
+                                            in_storage_class_tag = false;
                                         }
                                     }
                                     Ok(Event::Eof) => break,
@@ -758,15 +849,16 @@ impl<'a> Handler<'a> {
                 }
             }
         }
-        Ok(())
+        Ok(output)
     }
 
     /// List all bucket of an account
-    pub fn ls(&self, bucket: Option<&str>) -> Result<(), &'static str> {
+    pub fn ls(&self, bucket: Option<&str>) -> Result<Vec<S3Object>, &'static str> {
+        let mut output = Vec::new();
         let res: String;
-        match bucket {
+        let s3_object = S3Object::from(bucket.unwrap_or("s3://").to_string());
+        match s3_object.bucket.clone() {
             Some(b) => {
-                let s3_object = S3Object::from(b.to_string());
                 match self.auth_type {
                     AuthType::AWS4 => {
                         res = std::str::from_utf8(
@@ -800,37 +892,64 @@ impl<'a> Handler<'a> {
                     }
                 }
                 match self.format {
-                    // TODO return s3 object  vector
                     Format::JSON => {
                         let re = Regex::new(RESPONSE_FORMAT).unwrap();
-                        for cap in re.captures_iter(&res) {
-                            println!("s3://{}/{}", b, &cap[1]);
-                        }
+                        output.extend(re.captures_iter(&res).map(|cap| {
+                            S3Convert::new(
+                                Some(b.to_string()),
+                                Some(cap[1].to_string()),
+                                Some(cap[2].to_string()),
+                                Some(cap[3].to_string()),
+                                Some(cap[5].to_string()),
+                            )
+                        }));
                     }
                     Format::XML => {
                         let mut reader = Reader::from_str(&res);
                         let mut in_key_tag = false;
+                        let mut in_mtime_tag = false;
+                        let mut in_etag_tag = false;
+                        let mut in_storage_class_tag = false;
+                        let mut key = String::new();
+                        let mut mtime = String::new();
+                        let mut etag = String::new();
+                        let mut storage_class = String::new();
                         let mut buf = Vec::new();
-
                         loop {
                             match reader.read_event(&mut buf) {
-                                Ok(Event::Start(ref e)) => {
-                                    if e.name() == b"Key" {
-                                        in_key_tag = true
-                                    }
-                                }
-                                Ok(Event::End(ref e)) => {
-                                    if e.name() == b"Key" {
-                                        in_key_tag = false
-                                    }
-                                }
+                                Ok(Event::Start(ref e)) => match e.name() {
+                                    b"Key" => in_key_tag = true,
+                                    b"LastModified" => in_mtime_tag = true,
+                                    b"ETag" => in_etag_tag = true,
+                                    b"StorageClass" => in_storage_class_tag = true,
+                                    _ => {}
+                                },
+                                Ok(Event::End(ref e)) => match e.name() {
+                                    b"Contents" => output.push(S3Convert::new(
+                                        Some(b.to_string()),
+                                        Some(key.clone()),
+                                        Some(mtime.clone()),
+                                        Some(etag[1..etag.len() - 1].to_string()),
+                                        Some(storage_class.clone()),
+                                    )),
+                                    _ => {}
+                                },
                                 Ok(Event::Text(e)) => {
                                     if in_key_tag {
-                                        println!(
-                                            "s3://{}/{}",
-                                            b,
-                                            e.unescape_and_decode(&reader).unwrap()
-                                        )
+                                        key = e.unescape_and_decode(&reader).unwrap();
+                                        in_key_tag = false;
+                                    }
+                                    if in_mtime_tag {
+                                        mtime = e.unescape_and_decode(&reader).unwrap();
+                                        in_mtime_tag = false;
+                                    }
+                                    if in_etag_tag {
+                                        etag = e.unescape_and_decode(&reader).unwrap();
+                                        in_etag_tag = false;
+                                    }
+                                    if in_storage_class_tag {
+                                        storage_class = e.unescape_and_decode(&reader).unwrap();
+                                        in_storage_class_tag = false;
                                     }
                                 }
                                 Ok(Event::Eof) => break,
@@ -883,11 +1002,17 @@ impl<'a> Handler<'a> {
                 match self.format {
                     Format::JSON => {
                         let result: serde_json::Value = serde_json::from_str(&res).unwrap();
-                        for bucket_list in result[1].as_array() {
-                            for bucket in bucket_list {
-                                println!("s3://{} ", bucket["Name"].as_str().unwrap());
-                            }
-                        }
+                        result[1].as_array().map(|bucket_list| {
+                            output.extend(bucket_list.iter().map(|b| {
+                                S3Convert::new(
+                                    Some(b["Name"].as_str().unwrap().to_string()),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                )
+                            }))
+                        });
                     }
                     Format::XML => {
                         let mut reader = Reader::from_str(&res);
@@ -908,10 +1033,13 @@ impl<'a> Handler<'a> {
                                 }
                                 Ok(Event::Text(e)) => {
                                     if in_name_tag {
-                                        println!(
-                                            "s3://{} ",
-                                            e.unescape_and_decode(&reader).unwrap()
-                                        )
+                                        output.push(S3Convert::new(
+                                            Some(e.unescape_and_decode(&reader).unwrap()),
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                        ));
                                     }
                                 }
                                 Ok(Event::Eof) => break,
@@ -928,7 +1056,7 @@ impl<'a> Handler<'a> {
                 }
             }
         };
-        Ok(())
+        Ok(output)
     }
 
     /// Upload a file to a S3 bucket
