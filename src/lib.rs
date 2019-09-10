@@ -606,6 +606,74 @@ impl<'a> Handler<'a> {
         )
     }
 
+    fn object_list_xml_parser(&self, res: &str) -> Result<Vec<S3Object>, &'static str> {
+        let mut output = Vec::new();
+        let mut reader = Reader::from_str(res);
+        let mut in_name_tag = false;
+        let mut in_key_tag = false;
+        let mut in_mtime_tag = false;
+        let mut in_etag_tag = false;
+        let mut in_storage_class_tag = false;
+        let mut bucket = String::new();
+        let mut key = String::new();
+        let mut mtime = String::new();
+        let mut etag = String::new();
+        let mut storage_class = String::new();
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event(&mut buf) {
+                Ok(Event::Start(ref e)) => match e.name() {
+                    b"Name" => in_name_tag = true,
+                    b"Key" => in_key_tag = true,
+                    b"LastModified" => in_mtime_tag = true,
+                    b"ETag" => in_etag_tag = true,
+                    b"StorageClass" => in_storage_class_tag = true,
+                    _ => {}
+                },
+                Ok(Event::End(ref e)) => match e.name() {
+                    b"Name" => {
+                        output.push(S3Convert::new(Some(bucket.clone()), None, None, None, None))
+                    }
+                    b"Contents" => output.push(S3Convert::new(
+                        Some(bucket.clone()),
+                        Some(key.clone()),
+                        Some(mtime.clone()),
+                        Some(etag[1..etag.len() - 1].to_string()),
+                        Some(storage_class.clone()),
+                    )),
+                    _ => {}
+                },
+                Ok(Event::Text(e)) => {
+                    if in_key_tag {
+                        key = e.unescape_and_decode(&reader).unwrap();
+                        in_key_tag = false;
+                    }
+                    if in_mtime_tag {
+                        mtime = e.unescape_and_decode(&reader).unwrap();
+                        in_mtime_tag = false;
+                    }
+                    if in_etag_tag {
+                        etag = e.unescape_and_decode(&reader).unwrap();
+                        in_etag_tag = false;
+                    }
+                    if in_storage_class_tag {
+                        storage_class = e.unescape_and_decode(&reader).unwrap();
+                        in_storage_class_tag = false;
+                    }
+                    if in_name_tag {
+                        bucket = e.unescape_and_decode(&reader).unwrap();
+                        in_name_tag = false;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => panic!("Error at position {}: {:?}", reader.buffer_position(), e),
+                _ => (),
+            }
+            buf.clear();
+        }
+        Ok(output)
+    }
+
     /// List all objects in a bucket
     pub fn la(&self) -> Result<Vec<S3Object>, &'static str> {
         let mut output = Vec::new();
@@ -640,33 +708,11 @@ impl<'a> Handler<'a> {
                 });
             }
             Format::XML => {
-                let mut reader = Reader::from_str(&res);
-                let mut in_name_tag = false;
-                let mut buf = Vec::new();
-
-                loop {
-                    match reader.read_event(&mut buf) {
-                        Ok(Event::Start(ref e)) => {
-                            if e.name() == b"Name" {
-                                in_name_tag = true;
-                            }
-                        }
-                        Ok(Event::End(ref e)) => {
-                            if e.name() == b"Name" {
-                                in_name_tag = false;
-                            }
-                        }
-                        Ok(Event::Text(e)) => {
-                            if in_name_tag {
-                                buckets.push(e.unescape_and_decode(&reader).unwrap());
-                            }
-                        }
-                        Ok(Event::Eof) => break,
-                        Err(e) => panic!("Error at position {}: {:?}", reader.buffer_position(), e),
-                        _ => (),
-                    }
-                    buf.clear();
-                }
+                buckets.extend(
+                    self.object_list_xml_parser(&res)?
+                        .iter()
+                        .map(|o| o.bucket.clone().unwrap()),
+                );
             }
         }
         for bucket in buckets {
@@ -700,63 +746,7 @@ impl<'a> Handler<'a> {
                             }));
                         }
                         Format::XML => {
-                            let mut reader = Reader::from_str(&res);
-                            let mut in_key_tag = false;
-                            let mut in_mtime_tag = false;
-                            let mut in_etag_tag = false;
-                            let mut in_storage_class_tag = false;
-                            let mut key = String::new();
-                            let mut mtime = String::new();
-                            let mut etag = String::new();
-                            let mut storage_class = String::new();
-                            let mut buf = Vec::new();
-                            loop {
-                                match reader.read_event(&mut buf) {
-                                    Ok(Event::Start(ref e)) => match e.name() {
-                                        b"Key" => in_key_tag = true,
-                                        b"LastModified" => in_mtime_tag = true,
-                                        b"ETag" => in_etag_tag = true,
-                                        b"StorageClass" => in_storage_class_tag = true,
-                                        _ => {}
-                                    },
-                                    Ok(Event::End(ref e)) => match e.name() {
-                                        b"Contents" => output.push(S3Convert::new(
-                                            Some(bucket.clone()),
-                                            Some(key.clone()),
-                                            Some(mtime.clone()),
-                                            Some(etag[1..etag.len() - 1].to_string()),
-                                            Some(storage_class.clone()),
-                                        )),
-                                        _ => {}
-                                    },
-                                    Ok(Event::Text(e)) => {
-                                        if in_key_tag {
-                                            key = e.unescape_and_decode(&reader).unwrap();
-                                            in_key_tag = false;
-                                        }
-                                        if in_mtime_tag {
-                                            mtime = e.unescape_and_decode(&reader).unwrap();
-                                            in_mtime_tag = false;
-                                        }
-                                        if in_etag_tag {
-                                            etag = e.unescape_and_decode(&reader).unwrap();
-                                            in_etag_tag = false;
-                                        }
-                                        if in_storage_class_tag {
-                                            storage_class = e.unescape_and_decode(&reader).unwrap();
-                                            in_storage_class_tag = false;
-                                        }
-                                    }
-                                    Ok(Event::Eof) => break,
-                                    Err(e) => panic!(
-                                        "Error at position {}: {:?}",
-                                        reader.buffer_position(),
-                                        e
-                                    ),
-                                    _ => (),
-                                }
-                                buf.clear();
-                            }
+                            output.extend(self.object_list_xml_parser(&res)?);
                         }
                     }
                 }
@@ -787,63 +777,7 @@ impl<'a> Handler<'a> {
                             }));
                         }
                         Format::XML => {
-                            let mut reader = Reader::from_str(&res);
-                            let mut in_key_tag = false;
-                            let mut in_mtime_tag = false;
-                            let mut in_etag_tag = false;
-                            let mut in_storage_class_tag = false;
-                            let mut key = String::new();
-                            let mut mtime = String::new();
-                            let mut etag = String::new();
-                            let mut storage_class = String::new();
-                            let mut buf = Vec::new();
-                            loop {
-                                match reader.read_event(&mut buf) {
-                                    Ok(Event::Start(ref e)) => match e.name() {
-                                        b"Key" => in_key_tag = true,
-                                        b"LastModified" => in_mtime_tag = true,
-                                        b"ETag" => in_etag_tag = true,
-                                        b"StorageClass" => in_storage_class_tag = true,
-                                        _ => {}
-                                    },
-                                    Ok(Event::End(ref e)) => match e.name() {
-                                        b"Contents" => output.push(S3Convert::new(
-                                            Some(bucket.clone()),
-                                            Some(key.clone()),
-                                            Some(mtime.clone()),
-                                            Some(etag[1..etag.len() - 1].to_string()),
-                                            Some(storage_class.clone()),
-                                        )),
-                                        _ => {}
-                                    },
-                                    Ok(Event::Text(e)) => {
-                                        if in_key_tag {
-                                            key = e.unescape_and_decode(&reader).unwrap();
-                                            in_key_tag = false;
-                                        }
-                                        if in_mtime_tag {
-                                            mtime = e.unescape_and_decode(&reader).unwrap();
-                                            in_mtime_tag = false;
-                                        }
-                                        if in_etag_tag {
-                                            etag = e.unescape_and_decode(&reader).unwrap();
-                                            in_etag_tag = false;
-                                        }
-                                        if in_storage_class_tag {
-                                            storage_class = e.unescape_and_decode(&reader).unwrap();
-                                            in_storage_class_tag = false;
-                                        }
-                                    }
-                                    Ok(Event::Eof) => break,
-                                    Err(e) => panic!(
-                                        "Error at position {}: {:?}",
-                                        reader.buffer_position(),
-                                        e
-                                    ),
-                                    _ => (),
-                                }
-                                buf.clear();
-                            }
+                            output.extend(self.object_list_xml_parser(&res)?);
                         }
                     }
                 }
@@ -905,63 +839,7 @@ impl<'a> Handler<'a> {
                         }));
                     }
                     Format::XML => {
-                        let mut reader = Reader::from_str(&res);
-                        let mut in_key_tag = false;
-                        let mut in_mtime_tag = false;
-                        let mut in_etag_tag = false;
-                        let mut in_storage_class_tag = false;
-                        let mut key = String::new();
-                        let mut mtime = String::new();
-                        let mut etag = String::new();
-                        let mut storage_class = String::new();
-                        let mut buf = Vec::new();
-                        loop {
-                            match reader.read_event(&mut buf) {
-                                Ok(Event::Start(ref e)) => match e.name() {
-                                    b"Key" => in_key_tag = true,
-                                    b"LastModified" => in_mtime_tag = true,
-                                    b"ETag" => in_etag_tag = true,
-                                    b"StorageClass" => in_storage_class_tag = true,
-                                    _ => {}
-                                },
-                                Ok(Event::End(ref e)) => match e.name() {
-                                    b"Contents" => output.push(S3Convert::new(
-                                        Some(b.to_string()),
-                                        Some(key.clone()),
-                                        Some(mtime.clone()),
-                                        Some(etag[1..etag.len() - 1].to_string()),
-                                        Some(storage_class.clone()),
-                                    )),
-                                    _ => {}
-                                },
-                                Ok(Event::Text(e)) => {
-                                    if in_key_tag {
-                                        key = e.unescape_and_decode(&reader).unwrap();
-                                        in_key_tag = false;
-                                    }
-                                    if in_mtime_tag {
-                                        mtime = e.unescape_and_decode(&reader).unwrap();
-                                        in_mtime_tag = false;
-                                    }
-                                    if in_etag_tag {
-                                        etag = e.unescape_and_decode(&reader).unwrap();
-                                        in_etag_tag = false;
-                                    }
-                                    if in_storage_class_tag {
-                                        storage_class = e.unescape_and_decode(&reader).unwrap();
-                                        in_storage_class_tag = false;
-                                    }
-                                }
-                                Ok(Event::Eof) => break,
-                                Err(e) => panic!(
-                                    "Error at position {}: {:?}",
-                                    reader.buffer_position(),
-                                    e
-                                ),
-                                _ => (),
-                            }
-                            buf.clear();
-                        }
+                        output.extend(self.object_list_xml_parser(&res)?);
                     }
                 }
             }
@@ -1015,43 +893,7 @@ impl<'a> Handler<'a> {
                         });
                     }
                     Format::XML => {
-                        let mut reader = Reader::from_str(&res);
-                        let mut in_name_tag = false;
-                        let mut buf = Vec::new();
-
-                        loop {
-                            match reader.read_event(&mut buf) {
-                                Ok(Event::Start(ref e)) => {
-                                    if e.name() == b"Name" {
-                                        in_name_tag = true
-                                    }
-                                }
-                                Ok(Event::End(ref e)) => {
-                                    if e.name() == b"Name" {
-                                        in_name_tag = false
-                                    }
-                                }
-                                Ok(Event::Text(e)) => {
-                                    if in_name_tag {
-                                        output.push(S3Convert::new(
-                                            Some(e.unescape_and_decode(&reader).unwrap()),
-                                            None,
-                                            None,
-                                            None,
-                                            None,
-                                        ));
-                                    }
-                                }
-                                Ok(Event::Eof) => break,
-                                Err(e) => panic!(
-                                    "Error at position {}: {:?}",
-                                    reader.buffer_position(),
-                                    e
-                                ),
-                                _ => (),
-                            }
-                            buf.clear();
-                        }
+                        output.extend(self.object_list_xml_parser(&res)?);
                     }
                 }
             }
