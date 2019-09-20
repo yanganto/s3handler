@@ -34,8 +34,9 @@ use url::Url;
 
 mod aws;
 
-static RESPONSE_FORMAT: &'static str =
+static RESPONSE_CONTENT_FORMAT: &'static str =
     r#""Contents":\["([^"]+?)","([^"]+?)","\\"([^"]+?)\\"",([^"]+?),"([^"]+?)"(.*?)\]"#;
+static RESPONSE_MARKER_FORMAT: &'static str = r#""NextMarker":"([^"]+?)","#;
 
 /// # The struct for credential config for each S3 cluster
 /// - host is a parameter for the server you want to link
@@ -605,6 +606,38 @@ impl<'a> Handler<'a> {
             None,
         )
     }
+    fn next_marker_xml_parser(&self, res: &str) -> Option<String> {
+        let mut reader = Reader::from_str(res);
+        let mut in_tag = false;
+        let mut buf = Vec::new();
+        let mut output = "".to_string();
+        loop {
+            match reader.read_event(&mut buf) {
+                Ok(Event::Start(ref e)) => match e.name() {
+                    b"NextMarker" => in_tag = true,
+                    _ => {}
+                },
+                Ok(Event::End(ref e)) => match e.name() {
+                    _ => {}
+                },
+                Ok(Event::Text(e)) => {
+                    if in_tag {
+                        output = e.unescape_and_decode(&reader).unwrap();
+                        break;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => panic!("Error at position {}: {:?}", reader.buffer_position(), e),
+                _ => (),
+            }
+            buf.clear();
+        }
+        if output.is_empty() {
+            None
+        } else {
+            Some(output)
+        }
+    }
 
     fn object_list_xml_parser(&self, res: &str) -> Result<Vec<S3Object>, &'static str> {
         let mut output = Vec::new();
@@ -677,7 +710,8 @@ impl<'a> Handler<'a> {
     /// List all objects in a bucket
     pub fn la(&self) -> Result<Vec<S3Object>, &'static str> {
         let mut output = Vec::new();
-        let re = Regex::new(RESPONSE_FORMAT).unwrap();
+        let content_re = Regex::new(RESPONSE_CONTENT_FORMAT).unwrap();
+        let next_marker_re = Regex::new(RESPONSE_MARKER_FORMAT).unwrap();
         let s3_object = S3Object::from("s3://".to_string());
         let mut res = match self.auth_type {
             AuthType::AWS4 => std::str::from_utf8(
@@ -717,67 +751,80 @@ impl<'a> Handler<'a> {
         }
         for bucket in buckets {
             let s3_object = S3Object::from(format!("s3://{}", bucket));
-            match self.auth_type {
-                AuthType::AWS4 => {
-                    res = std::str::from_utf8(
-                        &self
-                            .aws_v4_request(
-                                "GET",
-                                &s3_object,
-                                &Vec::new(),
-                                &Vec::new(),
-                                Vec::new(),
-                            )?
-                            .0,
-                    )
-                    .unwrap_or("")
-                    .to_string();
+            let mut next_marker = Some("".to_string());
+            while next_marker.is_some() {
+                match self.auth_type {
+                    AuthType::AWS4 => {
+                        res = std::str::from_utf8(
+                            &self
+                                .aws_v4_request(
+                                    "GET",
+                                    &s3_object,
+                                    &vec![("marker", &next_marker.clone().unwrap())],
+                                    &Vec::new(),
+                                    Vec::new(),
+                                )?
+                                .0,
+                        )
+                        .unwrap_or("")
+                        .to_string();
 
-                    match self.format {
-                        Format::JSON => {
-                            output.extend(re.captures_iter(&res).map(|cap| {
-                                S3Convert::new(
-                                    Some(bucket.clone()),
-                                    Some(cap[1].to_string()),
-                                    Some(cap[2].to_string()),
-                                    Some(cap[3].to_string()),
-                                    Some(cap[5].to_string()),
-                                )
-                            }));
-                        }
-                        Format::XML => {
-                            output.extend(self.object_list_xml_parser(&res)?);
+                        match self.format {
+                            Format::JSON => {
+                                next_marker = match next_marker_re.captures_iter(&res).nth(0) {
+                                    Some(c) => Some(c[1].to_string()),
+                                    None => None,
+                                };
+                                output.extend(content_re.captures_iter(&res).map(|cap| {
+                                    S3Convert::new(
+                                        Some(bucket.clone()),
+                                        Some(cap[1].to_string()),
+                                        Some(cap[2].to_string()),
+                                        Some(cap[3].to_string()),
+                                        Some(cap[5].to_string()),
+                                    )
+                                }));
+                            }
+                            Format::XML => {
+                                next_marker = self.next_marker_xml_parser(&res);
+                                output.extend(self.object_list_xml_parser(&res)?);
+                            }
                         }
                     }
-                }
-                AuthType::AWS2 => {
-                    res = std::str::from_utf8(
-                        &self
-                            .aws_v2_request(
-                                "GET",
-                                &s3_object,
-                                &Vec::new(),
-                                &Vec::new(),
-                                &Vec::new(),
-                            )?
-                            .0,
-                    )
-                    .unwrap_or("")
-                    .to_string();
-                    match self.format {
-                        Format::JSON => {
-                            output.extend(re.captures_iter(&res).map(|cap| {
-                                S3Convert::new(
-                                    Some(bucket.clone()),
-                                    Some(cap[1].to_string()),
-                                    Some(cap[2].to_string()),
-                                    Some(cap[3].to_string()),
-                                    Some(cap[5].to_string()),
-                                )
-                            }));
-                        }
-                        Format::XML => {
-                            output.extend(self.object_list_xml_parser(&res)?);
+                    AuthType::AWS2 => {
+                        res = std::str::from_utf8(
+                            &self
+                                .aws_v2_request(
+                                    "GET",
+                                    &s3_object,
+                                    &vec![("marker", &next_marker.clone().unwrap())],
+                                    &Vec::new(),
+                                    &Vec::new(),
+                                )?
+                                .0,
+                        )
+                        .unwrap_or("")
+                        .to_string();
+                        match self.format {
+                            Format::JSON => {
+                                next_marker = match next_marker_re.captures_iter(&res).nth(0) {
+                                    Some(c) => Some(c[1].to_string()),
+                                    None => None,
+                                };
+                                output.extend(content_re.captures_iter(&res).map(|cap| {
+                                    S3Convert::new(
+                                        Some(bucket.clone()),
+                                        Some(cap[1].to_string()),
+                                        Some(cap[2].to_string()),
+                                        Some(cap[3].to_string()),
+                                        Some(cap[5].to_string()),
+                                    )
+                                }));
+                            }
+                            Format::XML => {
+                                next_marker = self.next_marker_xml_parser(&res);
+                                output.extend(self.object_list_xml_parser(&res)?);
+                            }
                         }
                     }
                 }
@@ -787,59 +834,84 @@ impl<'a> Handler<'a> {
     }
 
     /// List all bucket of an account
-    pub fn ls(&self, bucket: Option<&str>) -> Result<Vec<S3Object>, &'static str> {
+    /// List all object of an bucket
+    pub fn ls(&self, prefix: Option<&str>) -> Result<Vec<S3Object>, &'static str> {
         let mut output = Vec::new();
-        let res: String;
-        let s3_object = S3Object::from(bucket.unwrap_or("s3://").to_string());
-        match s3_object.bucket.clone() {
+        let mut res: String;
+        let s3_object = S3Object::from(prefix.unwrap_or("s3://").to_string());
+        let s3_bucket = S3Object::new(s3_object.bucket, None, None, None, None);
+        match s3_bucket.bucket.clone() {
             Some(b) => {
-                match self.auth_type {
-                    AuthType::AWS4 => {
-                        res = std::str::from_utf8(
-                            &self
-                                .aws_v4_request(
-                                    "GET",
-                                    &s3_object,
-                                    &Vec::new(),
-                                    &Vec::new(),
-                                    Vec::new(),
-                                )?
-                                .0,
-                        )
-                        .unwrap_or("")
-                        .to_string();
-                    }
-                    AuthType::AWS2 => {
-                        res = std::str::from_utf8(
-                            &self
-                                .aws_v2_request(
-                                    "GET",
-                                    &s3_object,
-                                    &Vec::new(),
-                                    &Vec::new(),
-                                    &Vec::new(),
-                                )?
-                                .0,
-                        )
-                        .unwrap_or("")
-                        .to_string();
-                    }
-                }
-                match self.format {
-                    Format::JSON => {
-                        let re = Regex::new(RESPONSE_FORMAT).unwrap();
-                        output.extend(re.captures_iter(&res).map(|cap| {
-                            S3Convert::new(
-                                Some(b.to_string()),
-                                Some(cap[1].to_string()),
-                                Some(cap[2].to_string()),
-                                Some(cap[3].to_string()),
-                                Some(cap[5].to_string()),
+                let re = Regex::new(RESPONSE_CONTENT_FORMAT).unwrap();
+                let next_marker_re = Regex::new(RESPONSE_MARKER_FORMAT).unwrap();
+                let mut next_marker = Some("".to_string());
+                while next_marker.is_some() {
+                    match self.auth_type {
+                        AuthType::AWS4 => {
+                            res = std::str::from_utf8(
+                                &self
+                                    .aws_v4_request(
+                                        "GET",
+                                        &s3_bucket,
+                                        &vec![
+                                            (
+                                                "prefix",
+                                                &s3_object.key.clone().unwrap_or("/".to_string())
+                                                    [1..],
+                                            ),
+                                            ("marker", &next_marker.clone().unwrap()),
+                                        ],
+                                        &Vec::new(),
+                                        Vec::new(),
+                                    )?
+                                    .0,
                             )
-                        }));
+                            .unwrap_or("")
+                            .to_string();
+                        }
+                        AuthType::AWS2 => {
+                            res = std::str::from_utf8(
+                                &self
+                                    .aws_v2_request(
+                                        "GET",
+                                        &s3_bucket,
+                                        &vec![
+                                            (
+                                                "prefix",
+                                                &s3_object.key.clone().unwrap_or("/".to_string())
+                                                    [1..],
+                                            ),
+                                            ("marker", &next_marker.clone().unwrap()),
+                                        ],
+                                        &Vec::new(),
+                                        &Vec::new(),
+                                    )?
+                                    .0,
+                            )
+                            .unwrap_or("")
+                            .to_string();
+                        }
                     }
-                    Format::XML => {
-                        output.extend(self.object_list_xml_parser(&res)?);
+                    match self.format {
+                        Format::JSON => {
+                            next_marker = match next_marker_re.captures_iter(&res).nth(0) {
+                                Some(c) => Some(c[1].to_string()),
+                                None => None,
+                            };
+                            output.extend(re.captures_iter(&res).map(|cap| {
+                                S3Convert::new(
+                                    Some(b.to_string()),
+                                    Some(cap[1].to_string()),
+                                    Some(cap[2].to_string()),
+                                    Some(cap[3].to_string()),
+                                    Some(cap[5].to_string()),
+                                )
+                            }));
+                        }
+                        Format::XML => {
+                            next_marker = self.next_marker_xml_parser(&res);
+                            output.extend(self.object_list_xml_parser(&res)?);
+                        }
                     }
                 }
             }
