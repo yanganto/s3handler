@@ -136,7 +136,13 @@ pub struct Handler<'a> {
 /// assert_eq!(s3_object.key, Some("/objeckt_key".to_string()));
 /// assert_eq!("s3://bucket/objeckt_key".to_string(), String::from(s3_object));
 ///
-/// let s3_object: S3Object = S3Convert::new_from_uri("/bucket/objeckt_key".to_string());
+/// let s3_object: S3Object = S3Object::from("S3://bucket/objeckt_key".to_string());
+/// assert_eq!("s3://bucket/objeckt_key".to_string(), String::from(s3_object));
+///
+/// let s3_object: S3Object = S3Object::from("/bucket/objeckt_key".to_string());
+/// assert_eq!("s3://bucket/objeckt_key".to_string(), String::from(s3_object));
+///
+/// let s3_object: S3Object = S3Object::from("bucket/objeckt_key".to_string());
 /// assert_eq!("s3://bucket/objeckt_key".to_string(), String::from(s3_object));
 /// ```
 #[derive(Debug, Clone)]
@@ -150,26 +156,30 @@ pub struct S3Object {
 
 impl From<String> for S3Object {
     fn from(s3_path: String) -> Self {
-        let url_parser = Url::parse(&s3_path).unwrap();
-        let bucket = match url_parser.host_str() {
-            Some(h) if h != "" => Some(h.to_string()),
-            _ => None,
-        };
-        match url_parser.path() {
-            "/" => S3Object {
-                bucket: bucket,
-                key: None,
-                mtime: None,
-                etag: None,
-                storage_class: None,
-            },
-            _ => S3Object {
-                bucket: bucket,
-                key: Some(url_parser.path().to_string()),
-                mtime: None,
-                etag: None,
-                storage_class: None,
-            },
+        if s3_path.starts_with("s3://") || s3_path.starts_with("S3://") {
+            let url_parser = Url::parse(&s3_path).unwrap();
+            let bucket = match url_parser.host_str() {
+                Some(h) if h != "" => Some(h.to_string()),
+                _ => None,
+            };
+            match url_parser.path() {
+                "/" => S3Object {
+                    bucket: bucket,
+                    key: None,
+                    mtime: None,
+                    etag: None,
+                    storage_class: None,
+                },
+                _ => S3Object {
+                    bucket: bucket,
+                    key: Some(url_parser.path().to_string()),
+                    mtime: None,
+                    etag: None,
+                    storage_class: None,
+                },
+            }
+        } else {
+            S3Convert::new_from_uri(s3_path)
         }
     }
 }
