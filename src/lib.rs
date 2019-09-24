@@ -1022,6 +1022,8 @@ impl<'a> Handler<'a> {
             debug!("upload file size: {}", file_size);
 
             if file_size > 5242880 {
+                let total_part_number = file_size / 5242880 + 1;
+                debug!("upload file in {} parts", total_part_number);
                 let res = match self.auth_type {
                     AuthType::AWS4 => std::str::from_utf8(
                         &self
@@ -1053,7 +1055,9 @@ impl<'a> Handler<'a> {
                 let mut upload_id = "".to_string();
                 match self.format {
                     Format::JSON => {
-                        error!("No JSON Multipart Implement");
+                        let re = Regex::new(r#""UploadId":"(?P<upload_id>[^"]+)""#).unwrap();
+                        let caps = re.captures(&res).expect("Upload ID missing");
+                        upload_id = caps["upload_id"].to_string();
                     }
                     Format::XML => {
                         let mut reader = Reader::from_str(&res);
@@ -1099,44 +1103,81 @@ impl<'a> Handler<'a> {
                     Err(_) => return Err("input file open error"),
                 };
                 loop {
-                    let mut buffer = [0; 5242880];
-                    match fin.read_exact(&mut buffer) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("partial read file error: {}", e);
-                        }
-                    };
-
                     part += 1;
 
-                    trace!("part {}, size: {}", part, buffer.to_vec().len());
+                    let mut buffer = [0; 5242880];
+                    let mut tail_buffer = Vec::new();
+                    if part == total_part_number {
+                        match fin.read_to_end(&mut tail_buffer) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!("read last part of file error: {}", e);
+                            }
+                        };
+                    } else {
+                        match fin.read_exact(&mut buffer) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!("partial read file error: {}", e);
+                            }
+                        };
+                    }
 
+                    // TODO: concurent here
                     let headers = match self.auth_type {
                         AuthType::AWS4 => {
-                            self.aws_v4_request(
-                                "PUT",
-                                &s3_object,
-                                &vec![
-                                    ("uploadId", upload_id.as_str()),
-                                    ("partNumber", part.to_string().as_str()),
-                                ],
-                                &Vec::new(),
-                                buffer.to_vec(),
-                            )?
-                            .1
+                            if part == total_part_number {
+                                self.aws_v4_request(
+                                    "PUT",
+                                    &s3_object,
+                                    &vec![
+                                        ("uploadId", upload_id.as_str()),
+                                        ("partNumber", part.to_string().as_str()),
+                                    ],
+                                    &Vec::new(),
+                                    tail_buffer,
+                                )?
+                                .1
+                            } else {
+                                self.aws_v4_request(
+                                    "PUT",
+                                    &s3_object,
+                                    &vec![
+                                        ("uploadId", upload_id.as_str()),
+                                        ("partNumber", part.to_string().as_str()),
+                                    ],
+                                    &Vec::new(),
+                                    buffer.to_vec(),
+                                )?
+                                .1
+                            }
                         }
                         AuthType::AWS2 => {
-                            self.aws_v2_request(
-                                "PUT",
-                                &s3_object,
-                                &vec![
-                                    ("uploadId", upload_id.as_str()),
-                                    ("partNumber", part.to_string().as_str()),
-                                ],
-                                &Vec::new(),
-                                &buffer.to_vec(),
-                            )?
-                            .1
+                            if part == total_part_number {
+                                self.aws_v2_request(
+                                    "PUT",
+                                    &s3_object,
+                                    &vec![
+                                        ("uploadId", upload_id.as_str()),
+                                        ("partNumber", part.to_string().as_str()),
+                                    ],
+                                    &Vec::new(),
+                                    &tail_buffer,
+                                )?
+                                .1
+                            } else {
+                                self.aws_v2_request(
+                                    "PUT",
+                                    &s3_object,
+                                    &vec![
+                                        ("uploadId", upload_id.as_str()),
+                                        ("partNumber", part.to_string().as_str()),
+                                    ],
+                                    &Vec::new(),
+                                    &buffer.to_vec(),
+                                )?
+                                .1
+                            }
                         }
                     };
                     let etag = headers[reqwest::header::ETAG]
