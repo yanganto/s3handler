@@ -31,6 +31,8 @@ use regex::Regex;
 use reqwest::{header, Client, Response};
 use serde_json;
 use url::Url;
+use async_std::task;
+
 
 mod aws;
 
@@ -408,6 +410,23 @@ impl<'a> Handler<'a> {
         }
     }
 
+    async fn aws_v2_multipart_future(
+        &self,
+        s3_object: &S3Object,
+        upload_id: String,
+        part_number: String,
+        payload: &Vec<u8>,
+    ) -> Result<(String, String), &'static str> {
+        let headers = self.aws_v2_request(
+            "PUT",
+            s3_object,
+            &vec![("uploadId", upload_id.as_str()), ("partNumber", part_number.as_str()), ],
+            &Vec::new(),
+            payload
+        ).expect("mulitpart request error").1;
+        Ok((part_number.clone(), headers[reqwest::header::ETAG].to_str().expect("unexpected etag from server").to_string()))
+    }
+
     // region, endpoint parameters are used for HTTP redirect
     fn _aws_v4_request(
         &self,
@@ -616,6 +635,26 @@ impl<'a> Handler<'a> {
             None,
         )
     }
+
+    async fn aws_v4_multipart_future(
+        &self,
+        s3_object: &S3Object,
+        upload_id: String,
+        part_number: String,
+        payload: Vec<u8>,
+    ) -> Result<(String, String), &'static str> {
+        let headers = self._aws_v4_request(
+            "PUT",
+            s3_object,
+            &vec![("uploadId", upload_id.as_str()), ("partNumber", part_number.as_str()), ],
+            &Vec::new(),
+            payload,
+            self.region.clone(),
+            None,
+        ).expect("mulitpart request error").1;
+        Ok((part_number.clone(), headers[reqwest::header::ETAG].to_str().expect("unexpected etag from server").to_string()))
+    }
+
     fn next_marker_xml_parser(&self, res: &str) -> Option<String> {
         let mut reader = Reader::from_str(res);
         let mut in_tag = false;
@@ -1096,12 +1135,12 @@ impl<'a> Handler<'a> {
 
                 info!("upload id: {}", upload_id);
 
-                let mut etags = Vec::new();
                 let mut part = 0u64;
                 let mut fin = match File::open(file) {
                     Ok(f) => f,
                     Err(_) => return Err("input file open error"),
                 };
+                let mut jobs = Vec::new();
                 loop {
                     part += 1;
 
@@ -1123,98 +1162,68 @@ impl<'a> Handler<'a> {
                         };
                     }
 
-                    // TODO: concurent here
-                    let headers = match self.auth_type {
-                        AuthType::AWS4 => {
-                            if part == total_part_number {
-                                self.aws_v4_request(
-                                    "PUT",
-                                    &s3_object,
-                                    &vec![
-                                        ("uploadId", upload_id.as_str()),
-                                        ("partNumber", part.to_string().as_str()),
-                                    ],
-                                    &Vec::new(),
-                                    tail_buffer,
-                                )?
-                                .1
-                            } else {
-                                self.aws_v4_request(
-                                    "PUT",
-                                    &s3_object,
-                                    &vec![
-                                        ("uploadId", upload_id.as_str()),
-                                        ("partNumber", part.to_string().as_str()),
-                                    ],
-                                    &Vec::new(),
-                                    buffer.to_vec(),
-                                )?
-                                .1
-                            }
-                        }
-                        AuthType::AWS2 => {
-                            if part == total_part_number {
-                                self.aws_v2_request(
-                                    "PUT",
-                                    &s3_object,
-                                    &vec![
-                                        ("uploadId", upload_id.as_str()),
-                                        ("partNumber", part.to_string().as_str()),
-                                    ],
-                                    &Vec::new(),
-                                    &tail_buffer,
-                                )?
-                                .1
-                            } else {
-                                self.aws_v2_request(
-                                    "PUT",
-                                    &s3_object,
-                                    &vec![
-                                        ("uploadId", upload_id.as_str()),
-                                        ("partNumber", part.to_string().as_str()),
-                                    ],
-                                    &Vec::new(),
-                                    &buffer.to_vec(),
-                                )?
-                                .1
-                            }
-                        }
+                    let payload = if part == total_part_number {
+                        tail_buffer
+                    } else {
+                        buffer.to_vec()
                     };
-                    let etag = headers[reqwest::header::ETAG]
-                        .to_str()
-                        .expect("unexpected etag from server");
-                    etags.push((part.clone(), etag.to_string()));
-                    info!("part: {} uploaded, etag: {}", part, etag);
-
+                    jobs.push((part, payload));
                     if part * 5242880 >= file_size {
-                        let mut content = format!("<CompleteMultipartUpload>");
-                        for etag in etags {
-                            content.push_str(&format!(
-                                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
-                                etag.0, etag.1
-                            ));
-                        }
-                        content.push_str(&format!("</CompleteMultipartUpload>"));
-                        let _ = match self.auth_type {
-                            AuthType::AWS4 => self.aws_v4_request(
-                                "POST",
-                                &s3_object,
-                                &vec![("uploadId", upload_id.as_str())],
-                                &Vec::new(),
-                                content.into_bytes(),
-                            ),
-                            AuthType::AWS2 => self.aws_v2_request(
-                                "POST",
-                                &s3_object,
-                                &vec![("uploadId", upload_id.as_str())],
-                                &Vec::new(),
-                                &content.into_bytes(),
-                            ),
-                        };
-                        info!("complete multipart");
                         break;
                     }
                 }
+                // TODO: wait for std::task::Executor ready
+                let mut content = format!("<CompleteMultipartUpload>");
+                match self.auth_type {
+                    AuthType::AWS4 => {
+                        for job in jobs.iter().map(|t| self.aws_v4_multipart_future(
+                            &s3_object,
+                            upload_id.clone(),
+                            t.0.to_string(),
+                            t.1.clone(),
+                        )){
+                            let r = task::block_on(job).unwrap();
+                            info!("part: {} uploaded, etag: {}", r.0, r.1);
+                            content.push_str(&format!(
+                                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+                                r.0, r.1
+                            ));
+                        }
+                    },
+                    AuthType::AWS2 => {
+                        for job in jobs.iter().map(|t| self.aws_v2_multipart_future(
+                            &s3_object,
+                            upload_id.clone(),
+                            t.0.to_string(),
+                            &t.1,
+                        )){
+                            let r = task::block_on(job).unwrap();
+                            info!("part: {} uploaded, etag: {}", r.0, r.1);
+                            content.push_str(&format!(
+                                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+                                r.0, r.1
+                            ));
+                        }
+                    }
+                };
+                content.push_str(&format!("</CompleteMultipartUpload>"));
+                let _ = match self.auth_type {
+                    AuthType::AWS4 => self.aws_v4_request(
+                        "POST",
+                        &s3_object,
+                        &vec![("uploadId", upload_id.as_str())],
+                        &Vec::new(),
+                        content.into_bytes(),
+                    ),
+                    AuthType::AWS2 => self.aws_v2_request(
+                        "POST",
+                        &s3_object,
+                        &vec![("uploadId", upload_id.as_str())],
+                        &Vec::new(),
+                        &content.into_bytes(),
+                    ),
+                };
+                info!("complete multipart");
             } else {
                 content = Vec::new();
                 let mut fin = match File::open(file) {
