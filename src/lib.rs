@@ -7,8 +7,9 @@
 //!     user: None,
 //!     region: None, // default is us-east-1
 //!     s3_type: None, // default will try to config as AWS S3 handler
+//!     secure: None, // dafault is false, because the integrity protect by HMAC
 //! };
-//! let handler = s3handler::Handler::init_from_config(&config);
+//! let mut handler = s3handler::Handler::from(&config);
 //! let _ = handler.la();
 //! ```
 #[macro_use]
@@ -18,17 +19,18 @@ extern crate serde_derive;
 extern crate colored;
 extern crate url;
 
+use http::StatusCode;
 use std::convert::From;
 use std::fs::{metadata, write, File};
 use std::io::prelude::*;
 use std::path::Path;
 use std::str::FromStr;
 
-use chrono::prelude::*;
+use crate::aws::AWS4Client;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
-use reqwest::{header, Client, Response};
+use reqwest::Response;
 use serde_json;
 use url::Url;
 
@@ -55,6 +57,7 @@ pub struct CredentialConfig {
     pub secret_key: String,
     pub region: Option<String>,
     pub s3_type: Option<String>,
+    pub secure: Option<bool>,
 }
 
 /// # The signature type of Authentication
@@ -78,6 +81,7 @@ pub enum AuthType {
 /// # The response format
 /// AWS only support XML format (default)
 /// CEPH support JSON and XML
+#[derive(Clone)]
 pub enum Format {
     JSON,
     XML,
@@ -91,15 +95,33 @@ pub enum UrlStyle {
     HOST,
 }
 
+/// # The trait for S3Client
+/// - handle a valid request
+pub(crate) trait S3Client {
+    fn request(
+        &self,
+        method: &str,
+        host: &str,
+        uri: &str,
+        query_strings: &mut Vec<(&str, &str)>,
+        headers: &mut Vec<(&str, &str)>,
+        payload: &Vec<u8>,
+    ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), &'static str>;
+
+    fn redirect_parser(&self, body: Vec<u8>, format: Format) -> Result<String, &'static str>;
+    fn update(&mut self, region: String, secure: bool);
+    fn current_region(&self) -> Option<String>;
+}
+
 /// # The struct for generate the request
 /// - host is a parameter for the server you want to link
 ///     - it can be s3.us-east-1.amazonaws.com or a ip, ex 10.1.1.100, for a ceph node
-/// - access_key and secret_key are keys to connect to the cluster providing S3
 /// - auth_type specify the signature version of S3
 /// - format specify the s3 response from server
 /// - url_style specify the s3 request url style
 /// - region is a paramter for the S3 cluster location
 ///     - if region is not specified, it will take default value us-east-1
+/// - handle redirect
 /// It can be init from the config structure, for example:
 /// ```
 /// let config = s3handler::CredentialConfig{
@@ -109,17 +131,26 @@ pub enum UrlStyle {
 ///     user: None,
 ///     region: None, // default is us-east-1
 ///     s3_type: None, // default will try to config as AWS S3 handler
+///     secure: None, // dafault is false, because the integrity protect by HMAC
 /// };
-/// let handler = s3handler::Handler::init_from_config(&config);
+/// let mut handler = s3handler::Handler::from(&config);
 /// ```
 pub struct Handler<'a> {
-    pub host: &'a str,
     pub access_key: &'a str,
     pub secret_key: &'a str,
+    pub host: &'a str,
+
+    s3_client: Box<dyn S3Client + 'a>,
     pub auth_type: AuthType,
     pub format: Format,
     pub url_style: UrlStyle,
     pub region: Option<String>,
+
+    // redirect related paramters
+    domain_name: String,
+
+    // https for switch s3_client
+    secure: bool,
 }
 
 /// # Flexible S3 format parser
@@ -279,11 +310,11 @@ impl S3Convert for S3Object {
 }
 
 trait ResponseHandler {
-    fn handle_response(&mut self) -> (Vec<u8>, reqwest::header::HeaderMap);
+    fn handle_response(&mut self) -> (StatusCode, Vec<u8>, reqwest::header::HeaderMap);
 }
 
 impl ResponseHandler for Response {
-    fn handle_response(&mut self) -> (Vec<u8>, reqwest::header::HeaderMap) {
+    fn handle_response(&mut self) -> (StatusCode, Vec<u8>, reqwest::header::HeaderMap) {
         let mut body = Vec::new();
         let _ = self.read_to_end(&mut body);
         if self.status().is_success() || self.status().is_redirection() {
@@ -301,172 +332,19 @@ impl ResponseHandler for Response {
                 std::str::from_utf8(&body).expect("Body can not decode as UTF8")
             );
         }
-        (body, self.headers().clone())
+        (self.status(), body, self.headers().clone())
     }
 }
 
-impl<'a> Handler<'a> {
-    fn aws_v2_request(
-        &self,
+impl Handler<'_> {
+    fn request(
+        &mut self,
         method: &str,
         s3_object: &S3Object,
         qs: &Vec<(&str, &str)>,
-        insert_headers: &Vec<(&str, &str)>,
+        headers: &mut Vec<(&str, &str)>,
         payload: &Vec<u8>,
     ) -> Result<(Vec<u8>, reqwest::header::HeaderMap), &'static str> {
-        let utc: DateTime<Utc> = Utc::now();
-        let mut headers = header::HeaderMap::new();
-        let time_str = utc.to_rfc2822();
-        headers.insert("date", time_str.clone().parse().unwrap());
-
-        // NOTE: ceph has bug using x-amz-date
-        let mut signed_headers = vec![("Date", time_str.as_str())];
-        let insert_headers_name: Vec<String> = insert_headers
-            .into_iter()
-            .map(|x| x.0.to_string())
-            .collect();
-
-        // Support AWS delete marker feature
-        if insert_headers_name.contains(&"delete-marker".to_string()) {
-            for h in insert_headers {
-                if h.0 == "delete-marker" {
-                    headers.insert("x-amz-delete-marker", h.1.parse().unwrap());
-                    signed_headers.push(("x-amz-delete-marker", h.1));
-                }
-            }
-        }
-
-        // Support BIGTERA secure delete feature
-        if insert_headers_name.contains(&"secure-delete".to_string()) {
-            for h in insert_headers {
-                if h.0 == "secure-delete" {
-                    headers.insert("x-amz-secure-delete", h.1.parse().unwrap());
-                    signed_headers.push(("x-amz-secure-delete", h.1));
-                }
-            }
-        }
-
-        let mut query_strings = vec![];
-        match self.format {
-            Format::JSON => query_strings.push(("format", "json")),
-            _ => {}
-        }
-
-        query_strings.extend(qs.iter().cloned());
-
-        let mut query = String::from_str("http://").unwrap();
-        let links;
-        match self.url_style {
-            UrlStyle::HOST => {
-                links = s3_object.virtural_host_style_links(self.host.to_string());
-                query.push_str(&links.0);
-                query.push_str(&links.1);
-            }
-            UrlStyle::PATH => {
-                links = s3_object.path_style_links(self.host.to_string());
-                query.push_str(self.host);
-                query.push_str(&links.1);
-            }
-        }
-        query.push('?');
-        query.push_str(&aws::canonical_query_string(&mut query_strings));
-        let signature = aws::aws_s3_v2_sign(
-            self.secret_key,
-            &aws::aws_s3_v2_get_string_to_signed(method, &links.1, &mut signed_headers, payload),
-        );
-        let mut authorize_string = String::from_str("AWS ").unwrap();
-        authorize_string.push_str(self.access_key);
-        authorize_string.push(':');
-        authorize_string.push_str(&signature);
-        headers.insert(header::AUTHORIZATION, authorize_string.parse().unwrap());
-
-        // get a client builder
-        let client = Client::builder().default_headers(headers).build().unwrap();
-
-        let action;
-        match method {
-            "GET" => {
-                action = client.get(query.as_str());
-            }
-            "PUT" => {
-                action = client.put(query.as_str());
-            }
-            "DELETE" => {
-                action = client.delete(query.as_str());
-            }
-            "POST" => {
-                action = client.post(query.as_str());
-            }
-            _ => {
-                error!("unspport HTTP verb");
-                action = client.get(query.as_str());
-            }
-        }
-        match action.body((*payload).clone()).send() {
-            Ok(mut res) => Ok(res.handle_response()),
-            Err(_) => Err("Reqwest Error"),
-        }
-    }
-
-    // region, endpoint parameters are used for HTTP redirect
-    fn _aws_v4_request(
-        &self,
-        method: &str,
-        s3_object: &S3Object,
-        qs: &Vec<(&str, &str)>,
-        insert_headers: &Vec<(&str, &str)>,
-        payload: Vec<u8>,
-        region: Option<String>,
-        endpoint: Option<String>,
-    ) -> Result<(Vec<u8>, reqwest::header::HeaderMap), &'static str> {
-        let utc: DateTime<Utc> = Utc::now();
-        let mut headers = header::HeaderMap::new();
-        let time_str = utc.format("%Y%m%dT%H%M%SZ").to_string();
-        headers.insert("x-amz-date", time_str.clone().parse().unwrap());
-
-        let payload_hash = aws::hash_payload(&payload);
-        headers.insert("x-amz-content-sha256", payload_hash.parse().unwrap());
-
-        let links = match self.url_style {
-            UrlStyle::HOST => s3_object.virtural_host_style_links(self.host.to_string()),
-            UrlStyle::PATH => s3_object.path_style_links(self.host.to_string()),
-        };
-        // follow the endpoint from http redirect first
-        let hostname = match endpoint {
-            Some(ep) => ep,
-            None => links.0,
-        };
-
-        let insert_headers_name: Vec<String> = insert_headers
-            .into_iter()
-            .map(|x| x.0.to_string())
-            .collect();
-
-        let mut signed_headers = vec![
-            ("X-AMZ-Date", time_str.as_str()),
-            ("Host", hostname.as_str()),
-        ];
-
-        // Support AWS delete marker feature
-        if insert_headers_name.contains(&"delete-marker".to_string()) {
-            for h in insert_headers {
-                if h.0 == "delete-marker" {
-                    headers.insert("x-amz-delete-marker", h.1.parse().unwrap());
-                    signed_headers.push(("x-amz-delete-marker", h.1));
-                }
-            }
-        }
-
-        // Support BIGTERA secure delete feature
-        if insert_headers_name.contains(&"secure-delete".to_string()) {
-            for h in insert_headers {
-                if h.0 == "secure-delete" {
-                    headers.insert("x-amz-secure-delete", h.1.parse().unwrap());
-                    signed_headers.push(("x-amz-secure-delete", h.1));
-                }
-            }
-        }
-
         let mut query_strings = vec![];
         match self.format {
             Format::JSON => query_strings.push(("format", "json")),
@@ -474,150 +352,53 @@ impl<'a> Handler<'a> {
         }
         query_strings.extend(qs.iter().cloned());
 
-        let mut query = String::from_str("http://").unwrap(); // TODO SSL as config
-        query.push_str(hostname.as_str());
-        query.push_str(links.1.as_str());
-        query.push('?');
-        query.push_str(&aws::canonical_query_string(&mut query_strings));
-        let signature = aws::aws_v4_sign(
-            self.secret_key,
-            aws::aws_v4_get_string_to_signed(
-                method,
-                links.1.as_str(),
-                &mut query_strings,
-                &mut signed_headers,
-                &payload,
-                utc.format("%Y%m%dT%H%M%SZ").to_string(),
-                region.clone(),
-                false,
-            )
-            .as_str(),
-            utc.format("%Y%m%d").to_string(),
-            region.clone(),
-            false,
-        );
-        let mut authorize_string = String::from_str("AWS4-HMAC-SHA256 Credential=").unwrap();
-        authorize_string.push_str(self.access_key);
-        authorize_string.push('/');
-        authorize_string.push_str(&format!(
-            "{}/{}/s3/aws4_request, SignedHeaders={}, Signature={}",
-            utc.format("%Y%m%d").to_string(),
-            region.clone().unwrap_or(String::from("us-east-1")),
-            aws::signed_headers(&mut signed_headers),
-            signature
-        ));
-        headers.insert(header::AUTHORIZATION, authorize_string.parse().unwrap());
+        let (request_host, uri) = match self.url_style {
+            UrlStyle::HOST => s3_object.virtural_host_style_links(self.domain_name.to_string()),
+            UrlStyle::PATH => s3_object.path_style_links(self.domain_name.to_string()),
+        };
 
-        // get a client builder
-        let client = Client::builder().default_headers(headers).build().unwrap();
+        debug!("method: {}", method);
+        debug!("request_host: {}", request_host);
+        debug!("uri: {}", uri);
 
-        let action;
-        match method {
-            "GET" => {
-                action = client.get(query.as_str());
-            }
-            "PUT" => {
-                action = client.put(query.as_str());
-            }
-            "DELETE" => {
-                action = client.delete(query.as_str());
-            }
-            "POST" => {
-                action = client.post(query.as_str());
-            }
-            _ => {
-                error!("unspport HTTP verb");
-                action = client.get(query.as_str());
-            }
-        }
-        match action.body(payload.clone()).send() {
-            Ok(mut res) => {
-                match res.status().is_redirection() {
-                    true => {
-                        let body = res.handle_response().0;
-                        let result = std::str::from_utf8(&body).unwrap_or("");
-                        let mut endpoint = "".to_string();
-                        match self.format {
-                            Format::JSON => {
-                                // Not implement, AWS response is XML, maybe ceph need this
-                                unimplemented!();
-                            }
-                            Format::XML => {
-                                let mut reader = Reader::from_str(&result);
-                                let mut in_tag = false;
-                                let mut buf = Vec::new();
-
-                                loop {
-                                    match reader.read_event(&mut buf) {
-                                        Ok(Event::Start(ref e)) => {
-                                            if e.name() == b"Endpoint" {
-                                                in_tag = true;
-                                            }
-                                        }
-                                        Ok(Event::End(ref e)) => {
-                                            if e.name() == b"Endpoint" {
-                                                in_tag = false;
-                                            }
-                                        }
-                                        Ok(Event::Text(e)) => {
-                                            if in_tag {
-                                                endpoint = e.unescape_and_decode(&reader).unwrap();
-                                            }
-                                        }
-                                        Ok(Event::Eof) => break,
-                                        Err(e) => panic!(
-                                            "Error at position {}: {:?}",
-                                            reader.buffer_position(),
-                                            e
-                                        ),
-                                        _ => (),
-                                    }
-                                    buf.clear();
-                                }
-                            }
-                        }
-                        self._aws_v4_request(
-                            method,
-                            s3_object,
-                            qs,
-                            insert_headers,
-                            payload,
-                            Some(
-                                res.headers()["x-amz-bucket-region"]
-                                    .to_str()
-                                    .unwrap_or("")
-                                    .to_string(),
-                            ),
-                            Some(endpoint),
-                        )
-                    }
-                    false => Ok(res.handle_response()),
-                }
-            }
-            Err(_) => Err("Reqwest Error"),
-        }
-    }
-
-    fn aws_v4_request(
-        &self,
-        method: &str,
-        s3_object: &S3Object,
-        qs: &Vec<(&str, &str)>,
-        headers: &Vec<(&str, &str)>,
-        payload: Vec<u8>,
-    ) -> Result<(Vec<u8>, reqwest::header::HeaderMap), &'static str> {
-        self._aws_v4_request(
+        let (status_code, body, response_headers) = self.s3_client.request(
             method,
-            s3_object,
-            qs,
+            &request_host,
+            &uri,
+            &mut query_strings,
             headers,
-            payload,
-            self.region.clone(),
-            None,
-        )
+            &payload,
+        )?;
+        match status_code.is_redirection() {
+            true => {
+                self.region = Some(
+                    response_headers["x-amz-bucket-region"]
+                        .to_str()
+                        .unwrap_or("")
+                        .to_string(),
+                );
+                // TODO: This should be better
+                // Change the region and request once
+                let origin_region = self.s3_client.current_region();
+                self.s3_client
+                    .update(self.region.clone().unwrap(), self.secure);
+                let (_status_code, body, response_headers) = self.s3_client.request(
+                    method,
+                    &self.s3_client.redirect_parser(body, self.format.clone())?,
+                    &uri,
+                    &mut query_strings,
+                    headers,
+                    &payload,
+                )?;
+                self.s3_client.update(origin_region.unwrap(), self.secure);
+                Ok((body, response_headers))
+            }
+            false => Ok((body, response_headers)),
+        }
     }
-    fn next_marker_xml_parser(&self, res: &str) -> Option<String> {
-        let mut reader = Reader::from_str(res);
+    fn next_marker_xml_parser(&self, body: &str) -> Option<String> {
+        // let result = std::str::from_utf8(body).unwrap_or("");
+        let mut reader = Reader::from_str(body);
         let mut in_tag = false;
         let mut buf = Vec::new();
         let mut output = "".to_string();
@@ -649,9 +430,9 @@ impl<'a> Handler<'a> {
         }
     }
 
-    fn object_list_xml_parser(&self, res: &str) -> Result<Vec<S3Object>, &'static str> {
+    fn object_list_xml_parser(&self, body: &str) -> Result<Vec<S3Object>, &'static str> {
+        let mut reader = Reader::from_str(body);
         let mut output = Vec::new();
-        let mut reader = Reader::from_str(res);
         let mut in_name_tag = false;
         let mut in_key_tag = false;
         let mut in_mtime_tag = false;
@@ -718,31 +499,18 @@ impl<'a> Handler<'a> {
     }
 
     /// List all objects in a bucket
-    pub fn la(&self) -> Result<Vec<S3Object>, &'static str> {
+    pub fn la(&mut self) -> Result<Vec<S3Object>, &'static str> {
         let mut output = Vec::new();
         let content_re = Regex::new(RESPONSE_CONTENT_FORMAT).unwrap();
         let next_marker_re = Regex::new(RESPONSE_MARKER_FORMAT).unwrap();
         let s3_object = S3Object::from("s3://".to_string());
-        let mut res = match self.auth_type {
-            AuthType::AWS4 => std::str::from_utf8(
-                &self
-                    .aws_v4_request("GET", &s3_object, &Vec::new(), &Vec::new(), Vec::new())?
-                    .0,
-            )
-            .unwrap_or("")
-            .to_string(),
-            AuthType::AWS2 => std::str::from_utf8(
-                &self
-                    .aws_v2_request("GET", &s3_object, &Vec::new(), &Vec::new(), &Vec::new())?
-                    .0,
-            )
-            .unwrap_or("")
-            .to_string(),
-        };
+        let res = &self
+            .request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())?
+            .0;
         let mut buckets = Vec::new();
         match self.format {
             Format::JSON => {
-                let result: serde_json::Value = serde_json::from_str(&res).unwrap();
+                let result: serde_json::Value = serde_json::from_slice(&res).unwrap();
                 result[1].as_array().map(|bucket_list| {
                     buckets.extend(
                         bucket_list
@@ -753,7 +521,7 @@ impl<'a> Handler<'a> {
             }
             Format::XML => {
                 buckets.extend(
-                    self.object_list_xml_parser(&res)?
+                    self.object_list_xml_parser(std::str::from_utf8(res).unwrap_or(""))?
                         .iter()
                         .map(|o| o.bucket.clone().unwrap()),
                 );
@@ -763,29 +531,29 @@ impl<'a> Handler<'a> {
             let s3_object = S3Object::from(format!("s3://{}", bucket));
             let mut next_marker = Some("".to_string());
             while next_marker.is_some() {
-                match self.auth_type {
-                    AuthType::AWS4 => {
-                        res = std::str::from_utf8(
-                            &self
-                                .aws_v4_request(
-                                    "GET",
-                                    &s3_object,
-                                    &vec![("marker", &next_marker.clone().unwrap())],
-                                    &Vec::new(),
-                                    Vec::new(),
-                                )?
-                                .0,
-                        )
-                        .unwrap_or("")
-                        .to_string();
+                let body = &self
+                    .request(
+                        "GET",
+                        &s3_object,
+                        &vec![("marker", &next_marker.clone().unwrap())],
+                        &mut Vec::new(),
+                        &Vec::new(),
+                    )?
+                    .0;
 
-                        match self.format {
-                            Format::JSON => {
-                                next_marker = match next_marker_re.captures_iter(&res).nth(0) {
-                                    Some(c) => Some(c[1].to_string()),
-                                    None => None,
-                                };
-                                output.extend(content_re.captures_iter(&res).map(|cap| {
+                match self.format {
+                    Format::JSON => {
+                        next_marker = match next_marker_re
+                            .captures_iter(std::str::from_utf8(body).unwrap_or(""))
+                            .nth(0)
+                        {
+                            Some(c) => Some(c[1].to_string()),
+                            None => None,
+                        };
+                        output.extend(
+                            content_re
+                                .captures_iter(std::str::from_utf8(body).unwrap_or(""))
+                                .map(|cap| {
                                     S3Convert::new(
                                         Some(bucket.clone()),
                                         Some(cap[1].to_string()),
@@ -793,49 +561,15 @@ impl<'a> Handler<'a> {
                                         Some(cap[3].to_string()),
                                         Some(cap[5].to_string()),
                                     )
-                                }));
-                            }
-                            Format::XML => {
-                                next_marker = self.next_marker_xml_parser(&res);
-                                output.extend(self.object_list_xml_parser(&res)?);
-                            }
-                        }
+                                }),
+                        );
                     }
-                    AuthType::AWS2 => {
-                        res = std::str::from_utf8(
-                            &self
-                                .aws_v2_request(
-                                    "GET",
-                                    &s3_object,
-                                    &vec![("marker", &next_marker.clone().unwrap())],
-                                    &Vec::new(),
-                                    &Vec::new(),
-                                )?
-                                .0,
-                        )
-                        .unwrap_or("")
-                        .to_string();
-                        match self.format {
-                            Format::JSON => {
-                                next_marker = match next_marker_re.captures_iter(&res).nth(0) {
-                                    Some(c) => Some(c[1].to_string()),
-                                    None => None,
-                                };
-                                output.extend(content_re.captures_iter(&res).map(|cap| {
-                                    S3Convert::new(
-                                        Some(bucket.clone()),
-                                        Some(cap[1].to_string()),
-                                        Some(cap[2].to_string()),
-                                        Some(cap[3].to_string()),
-                                        Some(cap[5].to_string()),
-                                    )
-                                }));
-                            }
-                            Format::XML => {
-                                next_marker = self.next_marker_xml_parser(&res);
-                                output.extend(self.object_list_xml_parser(&res)?);
-                            }
-                        }
+                    Format::XML => {
+                        next_marker =
+                            self.next_marker_xml_parser(std::str::from_utf8(body).unwrap_or(""));
+                        output.extend(
+                            self.object_list_xml_parser(std::str::from_utf8(body).unwrap_or(""))?,
+                        );
                     }
                 }
             }
@@ -843,9 +577,8 @@ impl<'a> Handler<'a> {
         Ok(output)
     }
 
-    /// List all bucket of an account
-    /// List all object of an bucket
-    pub fn ls(&self, prefix: Option<&str>) -> Result<Vec<S3Object>, &'static str> {
+    /// List all bucket of an account or List all object of an bucket
+    pub fn ls(&mut self, prefix: Option<&str>) -> Result<Vec<S3Object>, &'static str> {
         let mut output = Vec::new();
         let mut res: String;
         let s3_object = S3Object::from(prefix.unwrap_or("s3://").to_string());
@@ -856,52 +589,25 @@ impl<'a> Handler<'a> {
                 let next_marker_re = Regex::new(RESPONSE_MARKER_FORMAT).unwrap();
                 let mut next_marker = Some("".to_string());
                 while next_marker.is_some() {
-                    match self.auth_type {
-                        AuthType::AWS4 => {
-                            res = std::str::from_utf8(
-                                &self
-                                    .aws_v4_request(
-                                        "GET",
-                                        &s3_bucket,
-                                        &vec![
-                                            (
-                                                "prefix",
-                                                &s3_object.key.clone().unwrap_or("/".to_string())
-                                                    [1..],
-                                            ),
-                                            ("marker", &next_marker.clone().unwrap()),
-                                        ],
-                                        &Vec::new(),
-                                        Vec::new(),
-                                    )?
-                                    .0,
-                            )
-                            .unwrap_or("")
-                            .to_string();
-                        }
-                        AuthType::AWS2 => {
-                            res = std::str::from_utf8(
-                                &self
-                                    .aws_v2_request(
-                                        "GET",
-                                        &s3_bucket,
-                                        &vec![
-                                            (
-                                                "prefix",
-                                                &s3_object.key.clone().unwrap_or("/".to_string())
-                                                    [1..],
-                                            ),
-                                            ("marker", &next_marker.clone().unwrap()),
-                                        ],
-                                        &Vec::new(),
-                                        &Vec::new(),
-                                    )?
-                                    .0,
-                            )
-                            .unwrap_or("")
-                            .to_string();
-                        }
-                    }
+                    res = std::str::from_utf8(
+                        &self
+                            .request(
+                                "GET",
+                                &s3_bucket,
+                                &vec![
+                                    (
+                                        "prefix",
+                                        &s3_object.key.clone().unwrap_or("/".to_string())[1..],
+                                    ),
+                                    ("marker", &next_marker.clone().unwrap()),
+                                ],
+                                &mut Vec::new(),
+                                &Vec::new(),
+                            )?
+                            .0,
+                    )
+                    .unwrap_or("")
+                    .to_string();
                     match self.format {
                         Format::JSON => {
                             next_marker = match next_marker_re.captures_iter(&res).nth(0) {
@@ -927,41 +633,13 @@ impl<'a> Handler<'a> {
             }
             None => {
                 let s3_object = S3Object::from("s3://".to_string());
-                match self.auth_type {
-                    AuthType::AWS4 => {
-                        res = std::str::from_utf8(
-                            &self
-                                .aws_v4_request(
-                                    "GET",
-                                    &s3_object,
-                                    &Vec::new(),
-                                    &Vec::new(),
-                                    Vec::new(),
-                                )?
-                                .0,
-                        )
-                        .unwrap_or("")
-                        .to_string();
-                    }
-                    AuthType::AWS2 => {
-                        res = std::str::from_utf8(
-                            &self
-                                .aws_v2_request(
-                                    "GET",
-                                    &s3_object,
-                                    &Vec::new(),
-                                    &Vec::new(),
-                                    &Vec::new(),
-                                )?
-                                .0,
-                        )
-                        .unwrap_or("")
-                        .to_string();
-                    }
-                }
+                let body = &self
+                    .request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())?
+                    .0;
                 match self.format {
                     Format::JSON => {
-                        let result: serde_json::Value = serde_json::from_str(&res).unwrap();
+                        let result: serde_json::Value =
+                            serde_json::from_str(std::str::from_utf8(body).unwrap_or("")).unwrap();
                         result[1].as_array().map(|bucket_list| {
                             output.extend(bucket_list.iter().map(|b| {
                                 S3Convert::new(
@@ -975,7 +653,9 @@ impl<'a> Handler<'a> {
                         });
                     }
                     Format::XML => {
-                        output.extend(self.object_list_xml_parser(&res)?);
+                        output.extend(
+                            self.object_list_xml_parser(std::str::from_utf8(body).unwrap_or(""))?,
+                        );
                     }
                 }
             }
@@ -984,7 +664,7 @@ impl<'a> Handler<'a> {
     }
 
     /// Upload a file to a S3 bucket
-    pub fn put(&self, file: &str, dest: &str) -> Result<(), &'static str> {
+    pub fn put(&mut self, file: &str, dest: &str) -> Result<(), &'static str> {
         // TODO: handle XCOPY
         if file == "" || dest == "" {
             return Err("please specify the file and the destiney");
@@ -1002,14 +682,7 @@ impl<'a> Handler<'a> {
         if !Path::new(file).exists() && file == "test" {
             // TODO: add time info in the test file
             content = vec![83, 51, 82, 83, 32, 116, 101, 115, 116, 10]; // S3RS test/n
-            let _ = match self.auth_type {
-                AuthType::AWS4 => {
-                    self.aws_v4_request("PUT", &s3_object, &Vec::new(), &Vec::new(), content)
-                }
-                AuthType::AWS2 => {
-                    self.aws_v2_request("PUT", &s3_object, &Vec::new(), &Vec::new(), &content)
-                }
-            };
+            let _ = self.request("PUT", &s3_object, &Vec::new(), &mut Vec::new(), &content);
         } else {
             let file_size = match metadata(Path::new(file)) {
                 Ok(m) => m.len(),
@@ -1024,34 +697,19 @@ impl<'a> Handler<'a> {
             if file_size > 5242880 {
                 let total_part_number = file_size / 5242880 + 1;
                 debug!("upload file in {} parts", total_part_number);
-                let res = match self.auth_type {
-                    AuthType::AWS4 => std::str::from_utf8(
-                        &self
-                            .aws_v4_request(
-                                "POST",
-                                &s3_object,
-                                &vec![("uploads", "")],
-                                &Vec::new(),
-                                Vec::new(),
-                            )?
-                            .0,
-                    )
-                    .unwrap_or("")
-                    .to_string(),
-                    AuthType::AWS2 => std::str::from_utf8(
-                        &self
-                            .aws_v2_request(
-                                "POST",
-                                &s3_object,
-                                &vec![("uploads", "")],
-                                &Vec::new(),
-                                &Vec::new(),
-                            )?
-                            .0,
-                    )
-                    .unwrap_or("")
-                    .to_string(),
-                };
+                let res = std::str::from_utf8(
+                    &self
+                        .request(
+                            "POST",
+                            &s3_object,
+                            &vec![("uploads", "")],
+                            &mut Vec::new(),
+                            &Vec::new(),
+                        )?
+                        .0,
+                )
+                .unwrap_or("")
+                .to_string();
                 let mut upload_id = "".to_string();
                 match self.format {
                     Format::JSON => {
@@ -1124,61 +782,30 @@ impl<'a> Handler<'a> {
                     }
 
                     // TODO: concurent here
-                    let headers = match self.auth_type {
-                        AuthType::AWS4 => {
-                            if part == total_part_number {
-                                self.aws_v4_request(
-                                    "PUT",
-                                    &s3_object,
-                                    &vec![
-                                        ("uploadId", upload_id.as_str()),
-                                        ("partNumber", part.to_string().as_str()),
-                                    ],
-                                    &Vec::new(),
-                                    tail_buffer,
-                                )?
-                                .1
-                            } else {
-                                self.aws_v4_request(
-                                    "PUT",
-                                    &s3_object,
-                                    &vec![
-                                        ("uploadId", upload_id.as_str()),
-                                        ("partNumber", part.to_string().as_str()),
-                                    ],
-                                    &Vec::new(),
-                                    buffer.to_vec(),
-                                )?
-                                .1
-                            }
-                        }
-                        AuthType::AWS2 => {
-                            if part == total_part_number {
-                                self.aws_v2_request(
-                                    "PUT",
-                                    &s3_object,
-                                    &vec![
-                                        ("uploadId", upload_id.as_str()),
-                                        ("partNumber", part.to_string().as_str()),
-                                    ],
-                                    &Vec::new(),
-                                    &tail_buffer,
-                                )?
-                                .1
-                            } else {
-                                self.aws_v2_request(
-                                    "PUT",
-                                    &s3_object,
-                                    &vec![
-                                        ("uploadId", upload_id.as_str()),
-                                        ("partNumber", part.to_string().as_str()),
-                                    ],
-                                    &Vec::new(),
-                                    &buffer.to_vec(),
-                                )?
-                                .1
-                            }
-                        }
+                    let headers = if part == total_part_number {
+                        self.request(
+                            "PUT",
+                            &s3_object,
+                            &vec![
+                                ("uploadId", upload_id.as_str()),
+                                ("partNumber", part.to_string().as_str()),
+                            ],
+                            &mut Vec::new(),
+                            &tail_buffer,
+                        )?
+                        .1
+                    } else {
+                        self.request(
+                            "PUT",
+                            &s3_object,
+                            &vec![
+                                ("uploadId", upload_id.as_str()),
+                                ("partNumber", part.to_string().as_str()),
+                            ],
+                            &mut Vec::new(),
+                            &buffer.to_vec(),
+                        )?
+                        .1
                     };
                     let etag = headers[reqwest::header::ETAG]
                         .to_str()
@@ -1195,22 +822,13 @@ impl<'a> Handler<'a> {
                             ));
                         }
                         content.push_str(&format!("</CompleteMultipartUpload>"));
-                        let _ = match self.auth_type {
-                            AuthType::AWS4 => self.aws_v4_request(
-                                "POST",
-                                &s3_object,
-                                &vec![("uploadId", upload_id.as_str())],
-                                &Vec::new(),
-                                content.into_bytes(),
-                            ),
-                            AuthType::AWS2 => self.aws_v2_request(
-                                "POST",
-                                &s3_object,
-                                &vec![("uploadId", upload_id.as_str())],
-                                &Vec::new(),
-                                &content.into_bytes(),
-                            ),
-                        };
+                        let _ = self.request(
+                            "POST",
+                            &s3_object,
+                            &vec![("uploadId", upload_id.as_str())],
+                            &mut Vec::new(),
+                            &content.into_bytes(),
+                        )?;
                         info!("complete multipart");
                         break;
                     }
@@ -1222,21 +840,14 @@ impl<'a> Handler<'a> {
                     Err(_) => return Err("input file open error"),
                 };
                 let _ = fin.read_to_end(&mut content);
-                let _ = match self.auth_type {
-                    AuthType::AWS4 => {
-                        self.aws_v4_request("PUT", &s3_object, &Vec::new(), &Vec::new(), content)
-                    }
-                    AuthType::AWS2 => {
-                        self.aws_v2_request("PUT", &s3_object, &Vec::new(), &Vec::new(), &content)
-                    }
-                };
+                let _ = self.request("PUT", &s3_object, &Vec::new(), &mut Vec::new(), &content)?;
             };
         }
         Ok(())
     }
 
     /// Download an object from S3 service
-    pub fn get(&self, src: &str, file: Option<&str>) -> Result<(), &'static str> {
+    pub fn get(&mut self, src: &str, file: Option<&str>) -> Result<(), &'static str> {
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
             return Err("Please specific the object");
@@ -1251,57 +862,28 @@ impl<'a> Handler<'a> {
                 .unwrap_or("s3download"),
         };
 
-        match self.auth_type {
-            AuthType::AWS4 => {
-                match write(
-                    fout,
-                    self.aws_v4_request("GET", &s3_object, &Vec::new(), &Vec::new(), Vec::new())?
-                        .0,
-                ) {
-                    Ok(_) => return Ok(()),
-                    Err(_) => return Err("write file error"), //XXX
-                }
-            }
-            AuthType::AWS2 => {
-                match write(
-                    fout,
-                    self.aws_v2_request("GET", &s3_object, &Vec::new(), &Vec::new(), &Vec::new())?
-                        .0,
-                ) {
-                    Ok(_) => return Ok(()),
-                    Err(_) => return Err("write file error"), //XXX
-                }
-            }
+        match write(
+            fout,
+            self.request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())?
+                .0,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(_) => return Err("write file error"), //XXX
         }
     }
 
     /// Show an object's content, this method is use for quick check a small object on the fly
-    pub fn cat(&self, src: &str) -> Result<(), &'static str> {
+    pub fn cat(&mut self, src: &str) -> Result<(), &'static str> {
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
             return Err("Please specific the object");
         }
-
-        match self.auth_type {
-            AuthType::AWS4 => {
-                match self.aws_v4_request("GET", &s3_object, &Vec::new(), &Vec::new(), Vec::new()) {
-                    Ok(r) => {
-                        println!("{}", std::str::from_utf8(&r.0).unwrap_or(""));
-                        return Ok(());
-                    }
-                    Err(e) => return Err(e),
-                }
+        match self.request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new()) {
+            Ok(r) => {
+                println!("{}", std::str::from_utf8(&r.0).unwrap_or(""));
+                return Ok(());
             }
-            AuthType::AWS2 => {
-                match self.aws_v2_request("GET", &s3_object, &Vec::new(), &Vec::new(), &Vec::new())
-                {
-                    Ok(r) => {
-                        println!("{}", std::str::from_utf8(&r.0).unwrap_or(""));
-                        return Ok(());
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
+            Err(e) => return Err(e),
         }
     }
 
@@ -1309,67 +891,52 @@ impl<'a> Handler<'a> {
     /// - AWS - delete-marker
     /// - Bigtera - secure-delete
     pub fn del_with_flag(
-        &self,
+        &mut self,
         src: &str,
-        headers: &Vec<(&str, &str)>,
+        headers: &mut Vec<(&str, &str)>,
     ) -> Result<(), &'static str> {
         debug!("headers: {:?}", headers);
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
             return Err("Please specific the object");
         }
-        let _ = match self.auth_type {
-            AuthType::AWS4 => {
-                self.aws_v4_request("DELETE", &s3_object, &Vec::new(), headers, Vec::new())
-            }
-            AuthType::AWS2 => {
-                self.aws_v2_request("GET", &s3_object, &Vec::new(), headers, &Vec::new())
-            }
-        };
+        self.request("DELETE", &s3_object, &Vec::new(), headers, &Vec::new())?;
         Ok(())
     }
 
     /// Delete an object
-    pub fn del(&self, src: &str) -> Result<(), &'static str> {
-        self.del_with_flag(src, &Vec::new())
+    pub fn del(&mut self, src: &str) -> Result<(), &'static str> {
+        self.del_with_flag(src, &mut Vec::new())
     }
 
     /// Make a new bucket
-    pub fn mb(&self, bucket: &str) -> Result<(), &'static str> {
+    pub fn mb(&mut self, bucket: &str) -> Result<(), &'static str> {
         let s3_object = S3Object::from(bucket.to_string());
         if s3_object.bucket.is_none() {
             return Err("please specific the bucket name");
         }
-        let _ = match self.auth_type {
-            AuthType::AWS4 => {
-                self.aws_v4_request("PUT", &s3_object, &Vec::new(), &Vec::new(), Vec::new())
-            }
-            AuthType::AWS2 => {
-                self.aws_v2_request("PUT", &s3_object, &Vec::new(), &Vec::new(), &Vec::new())
-            }
-        };
+        self.request("PUT", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())?;
         Ok(())
     }
 
     /// Remove a bucket
-    pub fn rb(&self, bucket: &str) -> Result<(), &'static str> {
+    pub fn rb(&mut self, bucket: &str) -> Result<(), &'static str> {
         let s3_object = S3Object::from(bucket.to_string());
         if s3_object.bucket.is_none() {
             return Err("please specific the bucket name");
         }
-        let _ = match self.auth_type {
-            AuthType::AWS4 => {
-                self.aws_v4_request("DELETE", &s3_object, &Vec::new(), &Vec::new(), Vec::new())
-            }
-            AuthType::AWS2 => {
-                self.aws_v2_request("DELETE", &s3_object, &Vec::new(), &Vec::new(), &Vec::new())
-            }
-        };
+        self.request(
+            "DELETE",
+            &s3_object,
+            &Vec::new(),
+            &mut Vec::new(),
+            &Vec::new(),
+        )?;
         Ok(())
     }
 
     /// list all tags of an object
-    pub fn list_tag(&self, target: &str) -> Result<(), &'static str> {
+    pub fn list_tag(&mut self, target: &str) -> Result<(), &'static str> {
         let res: String;
         debug!("target: {:?}", target);
         let s3_object = S3Object::from(target.to_string());
@@ -1377,22 +944,19 @@ impl<'a> Handler<'a> {
             return Err("Please specific the object");
         }
         let query_string = vec![("tagging", "")];
-        res = match self.auth_type {
-            AuthType::AWS4 => std::str::from_utf8(
-                &self
-                    .aws_v4_request("GET", &s3_object, &query_string, &Vec::new(), Vec::new())?
-                    .0,
-            )
-            .unwrap_or("")
-            .to_string(),
-            AuthType::AWS2 => std::str::from_utf8(
-                &self
-                    .aws_v2_request("GET", &s3_object, &query_string, &Vec::new(), &Vec::new())?
-                    .0,
-            )
-            .unwrap_or("")
-            .to_string(),
-        };
+        res = std::str::from_utf8(
+            &self
+                .request(
+                    "GET",
+                    &s3_object,
+                    &query_string,
+                    &mut Vec::new(),
+                    &Vec::new(),
+                )?
+                .0,
+        )
+        .unwrap_or("")
+        .to_string();
         // TODO:
         // parse tagging output when CEPH tagging json format respose bug fixed
         println!("{}", res);
@@ -1400,7 +964,7 @@ impl<'a> Handler<'a> {
     }
 
     /// Put a tag on an object
-    pub fn add_tag(&self, target: &str, tags: &Vec<(&str, &str)>) -> Result<(), &'static str> {
+    pub fn add_tag(&mut self, target: &str, tags: &Vec<(&str, &str)>) -> Result<(), &'static str> {
         debug!("target: {:?}", target);
         debug!("tags: {:?}", tags);
         let s3_object = S3Object::from(target.to_string());
@@ -1418,50 +982,36 @@ impl<'a> Handler<'a> {
         debug!("payload: {:?}", content);
 
         let query_string = vec![("tagging", "")];
-        let _ = match self.auth_type {
-            AuthType::AWS4 => self.aws_v4_request(
-                "PUT",
-                &s3_object,
-                &query_string,
-                &Vec::new(),
-                content.into_bytes(),
-            ),
-            AuthType::AWS2 => self.aws_v2_request(
-                "PUT",
-                &s3_object,
-                &query_string,
-                &Vec::new(),
-                &content.into_bytes(),
-            ),
-        };
+        self.request(
+            "PUT",
+            &s3_object,
+            &query_string,
+            &mut Vec::new(),
+            &content.into_bytes(),
+        )?;
         Ok(())
     }
 
     /// Remove aa tag from an object
-    pub fn del_tag(&self, target: &str) -> Result<(), &'static str> {
+    pub fn del_tag(&mut self, target: &str) -> Result<(), &'static str> {
         debug!("target: {:?}", target);
         let s3_object = S3Object::from(target.to_string());
         if s3_object.key.is_none() {
             return Err("Please specific the object");
         }
         let query_string = vec![("tagging", "")];
-        let _ = match self.auth_type {
-            AuthType::AWS4 => {
-                self.aws_v4_request("DELETE", &s3_object, &query_string, &Vec::new(), Vec::new())
-            }
-            AuthType::AWS2 => self.aws_v2_request(
-                "DELETE",
-                &s3_object,
-                &query_string,
-                &Vec::new(),
-                &Vec::new(),
-            ),
-        };
+        self.request(
+            "DELETE",
+            &s3_object,
+            &query_string,
+            &mut Vec::new(),
+            &Vec::new(),
+        )?;
         Ok(())
     }
 
     /// Show the usage of a bucket (CEPH only)
-    pub fn usage(&self, target: &str, options: &Vec<(&str, &str)>) -> Result<(), &'static str> {
+    pub fn usage(&mut self, target: &str, options: &Vec<(&str, &str)>) -> Result<(), &'static str> {
         let s3_admin_bucket_object = S3Convert::new_from_uri("/admin/buckets".to_string());
         let s3_object = S3Object::from(target.to_string());
         let mut query_strings = options.clone();
@@ -1470,22 +1020,13 @@ impl<'a> Handler<'a> {
         };
         let bucket = s3_object.bucket.unwrap();
         query_strings.push(("bucket", &bucket));
-        let result = match self.auth_type {
-            AuthType::AWS4 => self.aws_v4_request(
-                "GET",
-                &s3_admin_bucket_object,
-                &query_strings,
-                &Vec::new(),
-                Vec::new(),
-            )?,
-            AuthType::AWS2 => self.aws_v2_request(
-                "GET",
-                &s3_admin_bucket_object,
-                &query_strings,
-                &Vec::new(),
-                &Vec::new(),
-            )?,
-        };
+        let result = self.request(
+            "GET",
+            &s3_admin_bucket_object,
+            &query_strings,
+            &mut Vec::new(),
+            &Vec::new(),
+        )?;
         match self.format {
             Format::JSON => {
                 let json: serde_json::Value;
@@ -1498,6 +1039,7 @@ impl<'a> Handler<'a> {
             Format::XML => {
                 // TODO:
                 // Ceph Ops api may not support xml
+                unimplemented!();
             }
         };
         Ok(())
@@ -1505,7 +1047,7 @@ impl<'a> Handler<'a> {
 
     /// Do a GET request for the specific URL
     /// This method is easily to show the configure of S3 not implemented
-    pub fn url_command(&self, url: &str) -> Result<(), &'static str> {
+    pub fn url_command(&mut self, url: &str) -> Result<(), &'static str> {
         let s3_object;
         let mut raw_qs = String::new();
         let mut query_strings = Vec::new();
@@ -1528,14 +1070,13 @@ impl<'a> Handler<'a> {
             }
         }
 
-        let result = match self.auth_type {
-            AuthType::AWS4 => {
-                self.aws_v4_request("GET", &s3_object, &query_strings, &Vec::new(), Vec::new())?
-            }
-            AuthType::AWS2 => {
-                self.aws_v2_request("GET", &s3_object, &query_strings, &Vec::new(), &Vec::new())?
-            }
-        };
+        let result = self.request(
+            "GET",
+            &s3_object,
+            &query_strings,
+            &mut Vec::new(),
+            &Vec::new(),
+        )?;
         println!("{}", std::str::from_utf8(&result.0).unwrap_or(""));
         Ok(())
     }
@@ -1607,23 +1148,14 @@ impl<'a> Handler<'a> {
             println!("usage: url_style [path/host]");
         }
     }
+}
 
-    /// Initailize the `Handler` from `CredentialConfig`
-    /// ```
-    /// let config = s3handler::CredentialConfig{
-    ///     host: "s3.us-east-1.amazonaws.com".to_string(),
-    ///     access_key: "akey".to_string(),
-    ///     secret_key: "skey".to_string(),
-    ///     user: None,
-    ///     region: None, // default is us-east-1
-    ///     s3_type: None, // default will try to config as AWS S3 handler
-    /// };
-    /// let handler = s3handler::Handler::init_from_config(&config);
-    /// ```
-    pub fn init_from_config(credential: &'a CredentialConfig) -> Self {
+impl<'a> From<&'a CredentialConfig> for Handler<'a> {
+    fn from(credential: &'a CredentialConfig) -> Self {
         debug!("host: {}", credential.host);
         debug!("access key: {}", credential.access_key);
         debug!("secret key: {}", credential.secret_key);
+
         match credential
             .clone()
             .s3_type
@@ -1631,35 +1163,65 @@ impl<'a> Handler<'a> {
             .as_str()
         {
             "aws" => Handler {
-                host: &credential.host,
                 access_key: &credential.access_key,
                 secret_key: &credential.secret_key,
+                host: &credential.host,
+
+                s3_client: Box::new(AWS4Client {
+                    tls: credential.secure.unwrap_or(false),
+                    access_key: &credential.access_key,
+                    secret_key: &credential.secret_key,
+                    host: &credential.host,
+                    region: credential.region.clone().unwrap(),
+                }),
                 auth_type: AuthType::AWS4,
                 format: Format::XML,
                 url_style: UrlStyle::HOST,
                 region: credential.region.clone(),
+                secure: credential.secure.unwrap_or(false),
+                domain_name: credential.host.to_string(),
             },
             "ceph" => Handler {
-                host: &credential.host,
                 access_key: &credential.access_key,
                 secret_key: &credential.secret_key,
+                host: &credential.host,
+
+                s3_client: Box::new(AWS4Client {
+                    tls: credential.secure.unwrap_or(false),
+                    access_key: &credential.access_key,
+                    secret_key: &credential.secret_key,
+                    host: &credential.host,
+                    region: credential.region.clone().unwrap(),
+                }),
                 auth_type: AuthType::AWS4,
                 format: Format::JSON,
                 url_style: UrlStyle::PATH,
                 region: credential.region.clone(),
+                secure: credential.secure.unwrap_or(false),
+                domain_name: credential.host.to_string(),
             },
             _ => Handler {
-                host: &credential.host,
                 access_key: &credential.access_key,
                 secret_key: &credential.secret_key,
+                host: &credential.host,
                 auth_type: AuthType::AWS4,
                 format: Format::XML,
                 url_style: UrlStyle::PATH,
                 region: credential.region.clone(),
+                secure: credential.secure.unwrap_or(false),
+                domain_name: credential.host.to_string(),
+                s3_client: Box::new(AWS4Client {
+                    tls: credential.secure.unwrap_or(false),
+                    access_key: &credential.access_key,
+                    secret_key: &credential.secret_key,
+                    host: &credential.host,
+                    region: credential.region.clone().unwrap_or("us-east-1".to_string()),
+                }),
             },
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
