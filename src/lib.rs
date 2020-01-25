@@ -194,7 +194,7 @@ impl From<String> for S3Object {
                 _ => None,
             };
             match url_parser.path() {
-                "/" => S3Object {
+                "/" | "" => S3Object {
                     bucket: bucket,
                     key: None,
                     mtime: None,
