@@ -1,13 +1,281 @@
+use crate::{Format, ResponseHandler, S3Client};
 use base64::encode;
+use chrono::prelude::*;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 use hmac::{Hmac, Mac};
 use hmacsha1;
+use http::StatusCode;
 use md5;
+use quick_xml::events::Event;
+use quick_xml::Reader;
+use reqwest::{header, Client};
 use rustc_serialize::hex::ToHex;
 use sha2::Sha256 as sha2_256;
 use std::str::FromStr;
 use url::form_urlencoded;
+
+pub(crate) struct AWS2Client<'a> {
+    pub tls: bool,
+    pub access_key: &'a str,
+    pub secret_key: &'a str,
+}
+
+pub(crate) struct AWS4Client<'a> {
+    pub tls: bool,
+    pub host: &'a str, // handle region redirect
+    pub access_key: &'a str,
+    pub secret_key: &'a str,
+    pub region: String,
+}
+
+impl S3Client for AWS2Client<'_> {
+    fn request(
+        &self,
+        method: &str,
+        host: &str,
+        uri: &str,
+        query_strings: &mut Vec<(&str, &str)>,
+        headers: &mut Vec<(&str, &str)>,
+        payload: &Vec<u8>,
+    ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), &'static str> {
+        let url = if self.tls {
+            format!(
+                "https://{}{}?{}",
+                host,
+                uri,
+                canonical_query_string(query_strings)
+            )
+        } else {
+            format!(
+                "http://{}{}?{}",
+                host,
+                uri,
+                canonical_query_string(query_strings)
+            )
+        };
+        let utc: DateTime<Utc> = Utc::now();
+        let mut request_headers = header::HeaderMap::new();
+        let time_str = utc.to_rfc2822();
+
+        // NOTE: ceph has bug using x-amz-date
+        let mut signed_headers = vec![("Date", time_str.as_str())];
+
+        let request_headers_name: Vec<String> =
+            headers.into_iter().map(|x| x.0.to_string()).collect();
+
+        request_headers.insert("date", time_str.clone().parse().unwrap());
+
+        // Support AWS delete marker feature
+        if request_headers_name.contains(&"delete-marker".to_string()) {
+            for h in headers {
+                if h.0 == "delete-marker" {
+                    request_headers.insert("x-amz-delete-marker", h.1.parse().unwrap());
+                    signed_headers.push(("x-amz-delete-marker", h.1));
+                }
+            }
+        }
+
+        let signature = aws_s3_v2_sign(
+            self.secret_key,
+            &aws_s3_v2_get_string_to_signed(method, uri, &mut signed_headers, payload),
+        );
+        let mut authorize_string = String::from_str("AWS ").unwrap();
+        authorize_string.push_str(self.access_key);
+        authorize_string.push(':');
+        authorize_string.push_str(&signature);
+        request_headers.insert(header::AUTHORIZATION, authorize_string.parse().unwrap());
+
+        // get a client builder
+        let client = Client::builder()
+            .default_headers(request_headers)
+            .build()
+            .unwrap();
+
+        let action;
+        match method {
+            "GET" => {
+                action = client.get(url.as_str());
+            }
+            "PUT" => {
+                action = client.put(url.as_str());
+            }
+            "DELETE" => {
+                action = client.delete(url.as_str());
+            }
+            "POST" => {
+                action = client.post(url.as_str());
+            }
+            _ => {
+                error!("unspport HTTP verb");
+                action = client.get(url.as_str());
+            }
+        }
+        match action.body((*payload).clone()).send() {
+            Ok(mut res) => Ok(res.handle_response()),
+            Err(_) => Err("Reqwest Error"),
+        }
+    }
+    fn redirect_parser(&self, _body: Vec<u8>, _format: Format) -> Result<String, &'static str> {
+        // TODO: implement redirect for aws2
+        unimplemented!();
+    }
+    fn update(&mut self, _region: String, _secure: bool) {
+        // AWS2 does not region info
+    }
+    fn current_region(&self) -> Option<String> {
+        None
+    }
+}
+
+impl S3Client for AWS4Client<'_> {
+    fn request(
+        &self,
+        method: &str,
+        host: &str,
+        uri: &str,
+        query_strings: &mut Vec<(&str, &str)>,
+        headers: &mut Vec<(&str, &str)>,
+        payload: &Vec<u8>,
+    ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), &'static str> {
+        let url = if self.tls {
+            format!(
+                "https://{}{}?{}",
+                host,
+                uri,
+                canonical_query_string(query_strings)
+            )
+        } else {
+            format!(
+                "http://{}{}?{}",
+                host,
+                uri,
+                canonical_query_string(query_strings)
+            )
+        };
+        let utc: DateTime<Utc> = Utc::now();
+        let mut request_headers = header::HeaderMap::new();
+        let time_str = utc.format("%Y%m%dT%H%M%SZ").to_string();
+        let payload_hash = hash_payload(&payload);
+
+        request_headers.insert("x-amz-date", time_str.clone().parse().unwrap());
+        request_headers.insert("x-amz-content-sha256", payload_hash.parse().unwrap());
+
+        let request_headers_name: Vec<String> =
+            headers.into_iter().map(|x| x.0.to_string()).collect();
+
+        let mut signed_headers = vec![("X-AMZ-Date", time_str.as_str()), ("Host", host)];
+
+        // Support AWS delete marker feature
+        if request_headers_name.contains(&"delete-marker".to_string()) {
+            for h in headers {
+                if h.0 == "delete-marker" {
+                    request_headers.insert("x-amz-delete-marker", h.1.parse().unwrap());
+                    signed_headers.push(("x-amz-delete-marker", h.1));
+                }
+            }
+        }
+
+        let signature = aws_v4_sign(
+            self.secret_key,
+            aws_v4_get_string_to_signed(
+                method,
+                uri,
+                query_strings,
+                &mut signed_headers,
+                &payload,
+                utc.format("%Y%m%dT%H%M%SZ").to_string(),
+                &self.region,
+                false,
+            )
+            .as_str(),
+            utc.format("%Y%m%d").to_string(),
+            &self.region,
+            false,
+        );
+        let mut authorize_string = String::from_str("AWS4-HMAC-SHA256 Credential=").unwrap();
+        authorize_string.push_str(self.access_key);
+        authorize_string.push('/');
+        authorize_string.push_str(&format!(
+            "{}/{}/s3/aws4_request, SignedHeaders={}, Signature={}",
+            utc.format("%Y%m%d").to_string(),
+            self.region,
+            sign_headers(&mut signed_headers),
+            signature
+        ));
+        request_headers.insert(header::AUTHORIZATION, authorize_string.parse().unwrap());
+
+        // get a client builder
+        let client = Client::builder()
+            .default_headers(request_headers)
+            .build()
+            .unwrap();
+
+        let action;
+        match method {
+            "GET" => {
+                action = client.get(url.as_str());
+            }
+            "PUT" => {
+                action = client.put(url.as_str());
+            }
+            "DELETE" => {
+                action = client.delete(url.as_str());
+            }
+            "POST" => {
+                action = client.post(url.as_str());
+            }
+            _ => {
+                error!("unspport HTTP verb");
+                action = client.get(url.as_str());
+            }
+        }
+        match action.body((*payload).clone()).send() {
+            Ok(mut res) => Ok(res.handle_response()),
+            Err(_) => Err("Reqwest Error"),
+        }
+    }
+    fn redirect_parser(&self, body: Vec<u8>, _format: Format) -> Result<String, &'static str> {
+        // TODO: hanldle JSON for ceph
+        let result = std::str::from_utf8(&body).unwrap_or("");
+        let mut endpoint = "".to_string();
+        let mut reader = Reader::from_str(&result);
+        let mut in_tag = false;
+        let mut buf = Vec::new();
+
+        loop {
+            match reader.read_event(&mut buf) {
+                Ok(Event::Start(ref e)) => {
+                    if e.name() == b"Endpoint" {
+                        in_tag = true;
+                    }
+                }
+                Ok(Event::End(ref e)) => {
+                    if e.name() == b"Endpoint" {
+                        in_tag = false;
+                    }
+                }
+                Ok(Event::Text(e)) => {
+                    if in_tag {
+                        endpoint = e.unescape_and_decode(&reader).unwrap();
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => panic!("Error at position {}: {:?}", reader.buffer_position(), e),
+                _ => (),
+            }
+            buf.clear();
+        }
+        Ok(endpoint)
+    }
+    fn update(&mut self, region: String, secure: bool) {
+        self.region = region;
+        self.tls = secure;
+    }
+    fn current_region(&self) -> Option<String> {
+        Some(self.region.to_string())
+    }
+}
 
 pub fn canonical_query_string(query_strings: &mut Vec<(&str, &str)>) -> String {
     query_strings.sort_by_key(|a| a.0);
@@ -59,7 +327,7 @@ fn canonical_amz_headers(headers: &mut Vec<(&str, &str)>) -> String {
 }
 
 //SignedHeaders = Lowercase(HeaderName0) + ';' + Lowercase(HeaderName1) + ";" + ... + Lowercase(HeaderNameN)
-pub fn signed_headers(headers: &mut Vec<(&str, &str)>) -> String {
+pub fn sign_headers(headers: &mut Vec<(&str, &str)>) -> String {
     let mut output = Vec::new();
     headers.sort_by(|a, b| a.0.to_lowercase().as_str().cmp(b.0.to_lowercase().as_str()));
     for h in headers {
@@ -96,7 +364,7 @@ fn aws_v4_canonical_request(
     input.push_str("\n");
     input.push_str(canonical_headers(headers).as_str());
     input.push_str("\n");
-    input.push_str(signed_headers(headers).as_str());
+    input.push_str(sign_headers(headers).as_str());
     input.push_str("\n");
     input.push_str(hash_payload(payload).as_str());
 
@@ -115,7 +383,7 @@ pub fn aws_v4_get_string_to_signed(
     headers: &mut Vec<(&str, &str)>,
     payload: &Vec<u8>,
     time_str: String,
-    region: Option<String>,
+    region: &str,
     iam: bool,
 ) -> String {
     let mut string_to_signed = String::from_str("AWS4-HMAC-SHA256\n").unwrap();
@@ -126,19 +394,12 @@ pub fn aws_v4_get_string_to_signed(
         false => "s3",
     };
     unsafe {
-        match region {
-            Some(r) => string_to_signed.push_str(&format!(
-                "{}/{}/{}/aws4_request",
-                time_str.slice_unchecked(0, 8),
-                r,
-                endpoint_type
-            )),
-            None => string_to_signed.push_str(&format!(
-                "{}/us-east-1/{}/aws4_request",
-                time_str.slice_unchecked(0, 8),
-                endpoint_type
-            )),
-        }
+        string_to_signed.push_str(&format!(
+            "{}/{}/{}/aws4_request",
+            time_str.get_unchecked(0..8),
+            region,
+            endpoint_type
+        ));
     }
     string_to_signed.push_str("\n");
     string_to_signed.push_str(
@@ -153,7 +414,7 @@ pub fn aws_v4_sign(
     secret_key: &str,
     data: &str,
     time_str: String,
-    region: Option<String>,
+    region: &str,
     iam: bool,
 ) -> String {
     let mut key = String::from("AWS4");
@@ -166,10 +427,7 @@ pub fn aws_v4_sign(
     debug!("date_k = {}", code_bytes.to_hex());
 
     let mut mac1 = Hmac::<sha2_256>::new(code_bytes);
-    match region {
-        None => mac1.input(b"us-east-1"),
-        Some(r) => mac1.input(r.as_bytes()),
-    }
+    mac1.input(region.as_bytes());
     let result1 = mac1.result();
     let code_bytes1 = result1.code();
     debug!("region_k = {}", code_bytes1.to_hex());
@@ -386,7 +644,7 @@ mod tests {
             &mut headers,
             &Vec::new(),
             "20150830T123600Z".to_string(),
-            Some(String::from("us-east-1")),
+            "us-east-1",
             true,
         );
 
@@ -408,7 +666,7 @@ mod tests {
              20150830/us-east-1/iam/aws4_request\n\
              f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59",
             "20150830".to_string(),
-            Some(String::from("us-east-1")),
+            "us-east-1",
             true,
         );
 
