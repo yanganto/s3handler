@@ -1,3 +1,4 @@
+use crate::error::Error;
 use crate::{Format, ResponseHandler, S3Client};
 use base64::encode;
 use chrono::prelude::*;
@@ -38,7 +39,7 @@ impl S3Client for AWS2Client<'_> {
         query_strings: &mut Vec<(&str, &str)>,
         headers: &mut Vec<(&str, &str)>,
         payload: &Vec<u8>,
-    ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), &'static str> {
+    ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), Error> {
         let url = if self.tls {
             format!(
                 "https://{}{}?{}",
@@ -111,12 +112,13 @@ impl S3Client for AWS2Client<'_> {
                 action = client.get(url.as_str());
             }
         }
-        match action.body((*payload).clone()).send() {
-            Ok(mut res) => Ok(res.handle_response()),
-            Err(_) => Err("Reqwest Error"),
-        }
+        action
+            .body((*payload).clone())
+            .send()
+            .map_err(|_| Error::ReqwestError())
+            .and_then(|mut res| Ok(res.handle_response()))
     }
-    fn redirect_parser(&self, _body: Vec<u8>, _format: Format) -> Result<String, &'static str> {
+    fn redirect_parser(&self, _body: Vec<u8>, _format: Format) -> Result<String, Error> {
         // TODO: implement redirect for aws2
         unimplemented!();
     }
@@ -137,7 +139,7 @@ impl S3Client for AWS4Client<'_> {
         query_strings: &mut Vec<(&str, &str)>,
         headers: &mut Vec<(&str, &str)>,
         payload: &Vec<u8>,
-    ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), &'static str> {
+    ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), Error> {
         let url = if self.tls {
             format!(
                 "https://{}{}?{}",
@@ -230,12 +232,13 @@ impl S3Client for AWS4Client<'_> {
                 action = client.get(url.as_str());
             }
         }
-        match action.body((*payload).clone()).send() {
-            Ok(mut res) => Ok(res.handle_response()),
-            Err(_) => Err("Reqwest Error"),
-        }
+        action
+            .body((*payload).clone())
+            .send()
+            .map_err(|_| Error::ReqwestError())
+            .and_then(|mut res| Ok(res.handle_response()))
     }
-    fn redirect_parser(&self, body: Vec<u8>, _format: Format) -> Result<String, &'static str> {
+    fn redirect_parser(&self, body: Vec<u8>, _format: Format) -> Result<String, Error> {
         // TODO: hanldle JSON for ceph
         let result = std::str::from_utf8(&body).unwrap_or("");
         let mut endpoint = "".to_string();
@@ -261,7 +264,7 @@ impl S3Client for AWS4Client<'_> {
                     }
                 }
                 Ok(Event::Eof) => break,
-                Err(e) => panic!("Error at position {}: {:?}", reader.buffer_position(), e),
+                Err(e) => return Err(Error::XMLParseError(e)),
                 _ => (),
             }
             buf.clear();
