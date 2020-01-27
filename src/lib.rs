@@ -27,6 +27,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::aws::AWS4Client;
+use crate::error::Error;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
@@ -35,6 +36,7 @@ use serde_json;
 use url::Url;
 
 mod aws;
+mod error;
 
 static RESPONSE_CONTENT_FORMAT: &'static str =
     r#""Contents":\["([^"]+?)","([^"]+?)","\\"([^"]+?)\\"",([^"]+?),"([^"]+?)"(.*?)\]"#;
@@ -49,6 +51,9 @@ static RESPONSE_MARKER_FORMAT: &'static str = r#""NextMarker":"([^"]+?)","#;
 ///     - if region is not specified, it will take default value us-east-1
 /// - s3 type is a shortcut to set up auth type, format, url style for aws or ceph
 ///     - if s3_type is not specified, it will take aws as default value, aws
+/// - secure is the request will send via https or not.  The integrity of requests is provided by
+/// HMAC, and the https requests can provid the confidentiality.
+///
 #[derive(Debug, Clone, Deserialize)]
 pub struct CredentialConfig {
     pub host: String,
@@ -106,9 +111,9 @@ pub(crate) trait S3Client {
         query_strings: &mut Vec<(&str, &str)>,
         headers: &mut Vec<(&str, &str)>,
         payload: &Vec<u8>,
-    ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), &'static str>;
+    ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), Error>;
 
-    fn redirect_parser(&self, body: Vec<u8>, format: Format) -> Result<String, &'static str>;
+    fn redirect_parser(&self, body: Vec<u8>, format: Format) -> Result<String, Error>;
     fn update(&mut self, region: String, secure: bool);
     fn current_region(&self) -> Option<String>;
 }
@@ -344,7 +349,7 @@ impl Handler<'_> {
         qs: &Vec<(&str, &str)>,
         headers: &mut Vec<(&str, &str)>,
         payload: &Vec<u8>,
-    ) -> Result<(Vec<u8>, reqwest::header::HeaderMap), &'static str> {
+    ) -> Result<(Vec<u8>, reqwest::header::HeaderMap), Error> {
         let mut query_strings = vec![];
         match self.format {
             Format::JSON => query_strings.push(("format", "json")),
@@ -430,7 +435,7 @@ impl Handler<'_> {
         }
     }
 
-    fn object_list_xml_parser(&self, body: &str) -> Result<Vec<S3Object>, &'static str> {
+    fn object_list_xml_parser(&self, body: &str) -> Result<Vec<S3Object>, Error> {
         let mut reader = Reader::from_str(body);
         let mut output = Vec::new();
         let mut in_name_tag = false;
@@ -490,7 +495,7 @@ impl Handler<'_> {
                     }
                 }
                 Ok(Event::Eof) => break,
-                Err(e) => panic!("Error at position {}: {:?}", reader.buffer_position(), e),
+                Err(e) => return Err(Error::XMLParseError(e)),
                 _ => (),
             }
             buf.clear();
@@ -499,7 +504,7 @@ impl Handler<'_> {
     }
 
     /// List all objects in a bucket
-    pub fn la(&mut self) -> Result<Vec<S3Object>, &'static str> {
+    pub fn la(&mut self) -> Result<Vec<S3Object>, Error> {
         let mut output = Vec::new();
         let content_re = Regex::new(RESPONSE_CONTENT_FORMAT).unwrap();
         let next_marker_re = Regex::new(RESPONSE_MARKER_FORMAT).unwrap();
@@ -578,7 +583,7 @@ impl Handler<'_> {
     }
 
     /// List all bucket of an account or List all object of an bucket
-    pub fn ls(&mut self, prefix: Option<&str>) -> Result<Vec<S3Object>, &'static str> {
+    pub fn ls(&mut self, prefix: Option<&str>) -> Result<Vec<S3Object>, Error> {
         let mut output = Vec::new();
         let mut res: String;
         let s3_object = S3Object::from(prefix.unwrap_or("s3://").to_string());
@@ -664,10 +669,10 @@ impl Handler<'_> {
     }
 
     /// Upload a file to a S3 bucket
-    pub fn put(&mut self, file: &str, dest: &str) -> Result<(), &'static str> {
+    pub fn put(&mut self, file: &str, dest: &str) -> Result<(), Error> {
         // TODO: handle XCOPY
         if file == "" || dest == "" {
-            return Err("please specify the file and the destiney");
+            return Err(Error::UserError("please specify the file and the destiney"));
         }
 
         let mut s3_object = S3Object::from(dest.to_string());
@@ -740,11 +745,7 @@ impl Handler<'_> {
                                     }
                                 }
                                 Ok(Event::Eof) => break,
-                                Err(e) => panic!(
-                                    "Error at position {}: {:?}",
-                                    reader.buffer_position(),
-                                    e
-                                ),
+                                Err(e) => return Err(Error::XMLParseError(e)),
                                 _ => (),
                             }
                             buf.clear();
@@ -756,29 +757,16 @@ impl Handler<'_> {
 
                 let mut etags = Vec::new();
                 let mut part = 0u64;
-                let mut fin = match File::open(file) {
-                    Ok(f) => f,
-                    Err(_) => return Err("input file open error"),
-                };
+                let mut fin = File::open(file)?;
                 loop {
                     part += 1;
 
                     let mut buffer = [0; 5242880];
                     let mut tail_buffer = Vec::new();
                     if part == total_part_number {
-                        match fin.read_to_end(&mut tail_buffer) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                error!("read last part of file error: {}", e);
-                            }
-                        };
+                        fin.read_to_end(&mut tail_buffer)?;
                     } else {
-                        match fin.read_exact(&mut buffer) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                error!("partial read file error: {}", e);
-                            }
-                        };
+                        fin.read_exact(&mut buffer)?
                     }
 
                     // TODO: concurent here
@@ -835,10 +823,7 @@ impl Handler<'_> {
                 }
             } else {
                 content = Vec::new();
-                let mut fin = match File::open(file) {
-                    Ok(f) => f,
-                    Err(_) => return Err("input file open error"),
-                };
+                let mut fin = File::open(file)?;
                 let _ = fin.read_to_end(&mut content);
                 let _ = self.request("PUT", &s3_object, &Vec::new(), &mut Vec::new(), &content)?;
             };
@@ -847,10 +832,10 @@ impl Handler<'_> {
     }
 
     /// Download an object from S3 service
-    pub fn get(&mut self, src: &str, file: Option<&str>) -> Result<(), &'static str> {
+    pub fn get(&mut self, src: &str, file: Option<&str>) -> Result<(), Error> {
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
-            return Err("Please specific the object");
+            return Err(Error::UserError("Please specific the object"));
         }
 
         let fout = match file {
@@ -862,29 +847,23 @@ impl Handler<'_> {
                 .unwrap_or("s3download"),
         };
 
-        match write(
+        write(
             fout,
             self.request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())?
                 .0,
-        ) {
-            Ok(_) => return Ok(()),
-            Err(_) => return Err("write file error"), //XXX
-        }
+        )?;
+        Ok(())
     }
 
     /// Show an object's content, this method is use for quick check a small object on the fly
-    pub fn cat(&mut self, src: &str) -> Result<(), &'static str> {
+    pub fn cat(&mut self, src: &str) -> Result<(), Error> {
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
-            return Err("Please specific the object");
+            return Err(Error::UserError("Please specific the object"));
         }
-        match self.request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new()) {
-            Ok(r) => {
-                println!("{}", std::str::from_utf8(&r.0).unwrap_or(""));
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        }
+        self.request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())
+            .map(|r| println!("{}", std::str::from_utf8(&r.0).unwrap_or("")))?;
+        Ok(())
     }
 
     /// Delete with header flags for some deletion features
@@ -894,36 +873,36 @@ impl Handler<'_> {
         &mut self,
         src: &str,
         headers: &mut Vec<(&str, &str)>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), Error> {
         debug!("headers: {:?}", headers);
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
-            return Err("Please specific the object");
+            return Err(Error::UserError("Please specific the object"));
         }
         self.request("DELETE", &s3_object, &Vec::new(), headers, &Vec::new())?;
         Ok(())
     }
 
     /// Delete an object
-    pub fn del(&mut self, src: &str) -> Result<(), &'static str> {
+    pub fn del(&mut self, src: &str) -> Result<(), Error> {
         self.del_with_flag(src, &mut Vec::new())
     }
 
     /// Make a new bucket
-    pub fn mb(&mut self, bucket: &str) -> Result<(), &'static str> {
+    pub fn mb(&mut self, bucket: &str) -> Result<(), Error> {
         let s3_object = S3Object::from(bucket.to_string());
         if s3_object.bucket.is_none() {
-            return Err("please specific the bucket name");
+            return Err(Error::UserError("please specific the bucket name"));
         }
         self.request("PUT", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())?;
         Ok(())
     }
 
     /// Remove a bucket
-    pub fn rb(&mut self, bucket: &str) -> Result<(), &'static str> {
+    pub fn rb(&mut self, bucket: &str) -> Result<(), Error> {
         let s3_object = S3Object::from(bucket.to_string());
         if s3_object.bucket.is_none() {
-            return Err("please specific the bucket name");
+            return Err(Error::UserError("please specific the bucket name"));
         }
         self.request(
             "DELETE",
@@ -936,12 +915,12 @@ impl Handler<'_> {
     }
 
     /// list all tags of an object
-    pub fn list_tag(&mut self, target: &str) -> Result<(), &'static str> {
+    pub fn list_tag(&mut self, target: &str) -> Result<(), Error> {
         let res: String;
         debug!("target: {:?}", target);
         let s3_object = S3Object::from(target.to_string());
         if s3_object.key.is_none() {
-            return Err("Please specific the object");
+            return Err(Error::UserError("Please specific the object"));
         }
         let query_string = vec![("tagging", "")];
         res = std::str::from_utf8(
@@ -964,12 +943,12 @@ impl Handler<'_> {
     }
 
     /// Put a tag on an object
-    pub fn add_tag(&mut self, target: &str, tags: &Vec<(&str, &str)>) -> Result<(), &'static str> {
+    pub fn add_tag(&mut self, target: &str, tags: &Vec<(&str, &str)>) -> Result<(), Error> {
         debug!("target: {:?}", target);
         debug!("tags: {:?}", tags);
         let s3_object = S3Object::from(target.to_string());
         if s3_object.key.is_none() {
-            return Err("Please specific the object");
+            return Err(Error::UserError("Please specific the object"));
         }
         let mut content = format!("<Tagging><TagSet>");
         for tag in tags {
@@ -993,11 +972,11 @@ impl Handler<'_> {
     }
 
     /// Remove aa tag from an object
-    pub fn del_tag(&mut self, target: &str) -> Result<(), &'static str> {
+    pub fn del_tag(&mut self, target: &str) -> Result<(), Error> {
         debug!("target: {:?}", target);
         let s3_object = S3Object::from(target.to_string());
         if s3_object.key.is_none() {
-            return Err("Please specific the object");
+            return Err(Error::UserError("Please specific the object"));
         }
         let query_string = vec![("tagging", "")];
         self.request(
@@ -1011,12 +990,12 @@ impl Handler<'_> {
     }
 
     /// Show the usage of a bucket (CEPH only)
-    pub fn usage(&mut self, target: &str, options: &Vec<(&str, &str)>) -> Result<(), &'static str> {
+    pub fn usage(&mut self, target: &str, options: &Vec<(&str, &str)>) -> Result<(), Error> {
         let s3_admin_bucket_object = S3Convert::new_from_uri("/admin/buckets".to_string());
         let s3_object = S3Object::from(target.to_string());
         let mut query_strings = options.clone();
         if s3_object.bucket.is_none() {
-            return Err("S3 format error.");
+            return Err(Error::UserError("S3 format not correct."));
         };
         let bucket = s3_object.bucket.unwrap();
         query_strings.push(("bucket", &bucket));
@@ -1047,7 +1026,7 @@ impl Handler<'_> {
 
     /// Do a GET request for the specific URL
     /// This method is easily to show the configure of S3 not implemented
-    pub fn url_command(&mut self, url: &str) -> Result<(), &'static str> {
+    pub fn url_command(&mut self, url: &str) -> Result<(), Error> {
         let s3_object;
         let mut raw_qs = String::new();
         let mut query_strings = Vec::new();
