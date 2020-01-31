@@ -17,22 +17,25 @@ extern crate log;
 #[macro_use]
 extern crate serde_derive;
 extern crate colored;
+extern crate failure;
 extern crate url;
 
 use http::StatusCode;
+use std::cmp;
 use std::convert::From;
 use std::fs::{metadata, write, File};
 use std::io::prelude::*;
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::aws::AWS4Client;
+use crate::aws::{AWS2Client, AWS4Client};
 use crate::error::Error;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
 use reqwest::Response;
 use serde_json;
+use std::sync::{mpsc, Arc, Mutex};
 use url::Url;
 
 mod aws;
@@ -78,6 +81,7 @@ pub struct CredentialConfig {
 /// - Asia Pacific (Singapore) Region
 /// - Asia Pacific (Sydney) Region
 /// - South America (So Paulo) Region
+#[derive(Copy, Clone)]
 pub enum AuthType {
     AWS4,
     AWS2,
@@ -341,6 +345,138 @@ impl ResponseHandler for Response {
     }
 }
 
+struct MiniUploadParameters {
+    host: String,
+    uri: String,
+    part_number: usize,
+    payload: Vec<u8>,
+}
+
+struct UploadRequestPool {
+    ch_data: Option<mpsc::Sender<Box<MiniUploadParameters>>>,
+    ch_result: mpsc::Receiver<Result<(usize, reqwest::header::HeaderMap), Error>>,
+    total_reqwest: usize,
+}
+
+impl UploadRequestPool {
+    fn new(
+        auth_type: AuthType,
+        secure: bool,
+        access_key: Arc<String>,
+        secret_key: Arc<String>,
+        host: Arc<String>,
+        region: Arc<String>,
+        upload_id: Arc<String>,
+        n: usize,
+        total_reqwest: usize,
+    ) -> Self {
+        let (ch_s, ch_r) = mpsc::channel();
+        let a_ch_r = Arc::new(Mutex::new(ch_r));
+        let (ch_result_s, ch_result_r) = mpsc::channel();
+        let a_ch_result_s = Arc::new(Mutex::new(ch_result_s));
+
+        for _ in 0..n {
+            let a_ch_r2 = a_ch_r.clone();
+            let a_ch_result_s2 = a_ch_result_s.clone();
+            let upload = upload_id.clone();
+            let akey = access_key.clone();
+            let skey = secret_key.clone();
+            let h = host.clone();
+            let r = region.clone();
+
+            std::thread::spawn(move || loop {
+                // make S3 Client here
+                let s3_client: Box<dyn S3Client> = match auth_type {
+                    AuthType::AWS2 => Box::new(AWS2Client {
+                        tls: secure,
+                        access_key: &akey,
+                        secret_key: &skey,
+                    }),
+                    AuthType::AWS4 => Box::new(AWS4Client {
+                        tls: secure,
+                        access_key: &akey,
+                        secret_key: &skey,
+                        host: &h,
+                        region: r.to_string(),
+                    }),
+                };
+                let m = a_ch_r2.lock().unwrap();
+                let p: Box<MiniUploadParameters> = match m.recv() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let r = a_ch_result_s2.lock().unwrap();
+                        r.send(Err(Error::RequestPoolError(format!("{:?}", e))))
+                            .ok();
+                        drop(r);
+                        return;
+                    }
+                };
+                drop(m);
+                match s3_client.request(
+                    "PUT",
+                    &p.host,
+                    &p.uri,
+                    &mut vec![
+                        ("uploadId", upload.as_str()),
+                        ("partNumber", p.part_number.to_string().as_str()),
+                    ],
+                    &mut Vec::new(),
+                    &p.payload,
+                ) {
+                    Ok(r) => {
+                        info!("Part {} uploaded", p.part_number);
+                        let rs = a_ch_result_s2.lock().unwrap();
+                        rs.send(Ok((p.part_number.clone(), r.2))).unwrap();
+                        drop(rs);
+                    }
+                    Err(e) => {
+                        let rs = a_ch_result_s2.lock().unwrap();
+                        rs.send(Err(e)).unwrap();
+                        drop(rs);
+                    }
+                };
+            });
+        }
+        UploadRequestPool {
+            ch_data: Some(ch_s),
+            total_reqwest,
+            ch_result: ch_result_r,
+        }
+    }
+    fn run(&self, p: MiniUploadParameters) {
+        if let Some(ref ch_s) = self.ch_data {
+            ch_s.send(Box::new(p)).unwrap();
+        }
+    }
+    fn wait(mut self) -> Result<String, Error> {
+        self.ch_data.take();
+        let mut results = Vec::new();
+        loop {
+            results.push(self.ch_result.recv().unwrap());
+            info!("{} parts uploaded", results.len());
+            if results.len() == self.total_reqwest {
+                let mut content = format!("<CompleteMultipartUpload>");
+                for res in results {
+                    debug!("{:?}", res);
+                    let r = res?;
+                    let part = r.0;
+                    let etag = r.1[reqwest::header::ETAG]
+                        .to_str()
+                        .expect("unexpected etag from server");
+
+                    info!("part: {}, etag: {}", part, etag);
+                    content.push_str(&format!(
+                        "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+                        part, etag
+                    ));
+                }
+                content.push_str(&format!("</CompleteMultipartUpload>"));
+                return Ok(content);
+            }
+        }
+    }
+}
+
 impl Handler<'_> {
     fn request(
         &mut self,
@@ -504,7 +640,7 @@ impl Handler<'_> {
     }
 
     /// List all objects in a bucket
-    pub fn la(&mut self) -> Result<Vec<S3Object>, Error> {
+    pub fn la(&mut self) -> Result<Vec<S3Object>, failure::Error> {
         let mut output = Vec::new();
         let content_re = Regex::new(RESPONSE_CONTENT_FORMAT).unwrap();
         let next_marker_re = Regex::new(RESPONSE_MARKER_FORMAT).unwrap();
@@ -583,7 +719,7 @@ impl Handler<'_> {
     }
 
     /// List all bucket of an account or List all object of an bucket
-    pub fn ls(&mut self, prefix: Option<&str>) -> Result<Vec<S3Object>, Error> {
+    pub fn ls(&mut self, prefix: Option<&str>) -> Result<Vec<S3Object>, failure::Error> {
         let mut output = Vec::new();
         let mut res: String;
         let s3_object = S3Object::from(prefix.unwrap_or("s3://").to_string());
@@ -669,10 +805,10 @@ impl Handler<'_> {
     }
 
     /// Upload a file to a S3 bucket
-    pub fn put(&mut self, file: &str, dest: &str) -> Result<(), Error> {
+    pub fn put(&mut self, file: &str, dest: &str) -> Result<(), failure::Error> {
         // TODO: handle XCOPY
         if file == "" || dest == "" {
-            return Err(Error::UserError("please specify the file and the destiney"));
+            return Err(Error::UserError("please specify the file and the destiney").into());
         }
 
         let mut s3_object = S3Object::from(dest.to_string());
@@ -700,7 +836,7 @@ impl Handler<'_> {
             debug!("upload file size: {}", file_size);
 
             if file_size > 5242880 {
-                let total_part_number = file_size / 5242880 + 1;
+                let total_part_number = (file_size / 5242881 + 1) as usize;
                 debug!("upload file in {} parts", total_part_number);
                 let res = std::str::from_utf8(
                     &self
@@ -745,7 +881,7 @@ impl Handler<'_> {
                                     }
                                 }
                                 Ok(Event::Eof) => break,
-                                Err(e) => return Err(Error::XMLParseError(e)),
+                                Err(e) => return Err(Error::XMLParseError(e).into()),
                                 _ => (),
                             }
                             buf.clear();
@@ -755,9 +891,26 @@ impl Handler<'_> {
 
                 info!("upload id: {}", upload_id);
 
-                let mut etags = Vec::new();
-                let mut part = 0u64;
+                let mut part = 0usize;
                 let mut fin = File::open(file)?;
+                let rp = UploadRequestPool::new(
+                    self.auth_type,
+                    self.secure,
+                    Arc::new(self.access_key.to_string()),
+                    Arc::new(self.secret_key.to_string()),
+                    Arc::new(self.host.to_string()),
+                    Arc::new(self.region.clone().unwrap_or("".to_string())),
+                    Arc::new(upload_id.clone()),
+                    // TODO: There are request TimedOut errors with multiple workers
+                    cmp::min(1, total_part_number),
+                    total_part_number,
+                );
+                let (host, uri) = match self.url_style {
+                    UrlStyle::HOST => {
+                        s3_object.virtural_host_style_links(self.domain_name.to_string())
+                    }
+                    UrlStyle::PATH => s3_object.path_style_links(self.domain_name.to_string()),
+                };
                 loop {
                     part += 1;
 
@@ -769,58 +922,35 @@ impl Handler<'_> {
                         fin.read_exact(&mut buffer)?
                     }
 
-                    // TODO: concurent here
-                    let headers = if part == total_part_number {
-                        self.request(
-                            "PUT",
-                            &s3_object,
-                            &vec![
-                                ("uploadId", upload_id.as_str()),
-                                ("partNumber", part.to_string().as_str()),
-                            ],
-                            &mut Vec::new(),
-                            &tail_buffer,
-                        )?
-                        .1
+                    if part == total_part_number {
+                        rp.run(MiniUploadParameters {
+                            host: host.clone(),
+                            uri: uri.clone(),
+                            part_number: part,
+                            payload: tail_buffer,
+                        });
                     } else {
-                        self.request(
-                            "PUT",
-                            &s3_object,
-                            &vec![
-                                ("uploadId", upload_id.as_str()),
-                                ("partNumber", part.to_string().as_str()),
-                            ],
-                            &mut Vec::new(),
-                            &buffer.to_vec(),
-                        )?
-                        .1
+                        rp.run(MiniUploadParameters {
+                            host: host.clone(),
+                            uri: uri.clone(),
+                            part_number: part,
+                            payload: buffer.to_vec().clone(),
+                        });
                     };
-                    let etag = headers[reqwest::header::ETAG]
-                        .to_str()
-                        .expect("unexpected etag from server");
-                    etags.push((part.clone(), etag.to_string()));
-                    info!("part: {} uploaded, etag: {}", part, etag);
-
-                    if part * 5242880 >= file_size {
-                        let mut content = format!("<CompleteMultipartUpload>");
-                        for etag in etags {
-                            content.push_str(&format!(
-                                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
-                                etag.0, etag.1
-                            ));
-                        }
-                        content.push_str(&format!("</CompleteMultipartUpload>"));
-                        let _ = self.request(
-                            "POST",
-                            &s3_object,
-                            &vec![("uploadId", upload_id.as_str())],
-                            &mut Vec::new(),
-                            &content.into_bytes(),
-                        )?;
-                        info!("complete multipart");
+                    if part * 5242880 >= (file_size as usize) {
                         break;
                     }
                 }
+
+                let content = rp.wait()?;
+                let _ = self.request(
+                    "POST",
+                    &s3_object,
+                    &vec![("uploadId", upload_id.as_str())],
+                    &mut Vec::new(),
+                    &content.into_bytes(),
+                )?;
+                info!("complete multipart");
             } else {
                 content = Vec::new();
                 let mut fin = File::open(file)?;
@@ -832,10 +962,10 @@ impl Handler<'_> {
     }
 
     /// Download an object from S3 service
-    pub fn get(&mut self, src: &str, file: Option<&str>) -> Result<(), Error> {
+    pub fn get(&mut self, src: &str, file: Option<&str>) -> Result<(), failure::Error> {
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
-            return Err(Error::UserError("Please specific the object"));
+            return Err(Error::UserError("Please specific the object").into());
         }
 
         let fout = match file {
@@ -856,10 +986,10 @@ impl Handler<'_> {
     }
 
     /// Show an object's content, this method is use for quick check a small object on the fly
-    pub fn cat(&mut self, src: &str) -> Result<(), Error> {
+    pub fn cat(&mut self, src: &str) -> Result<(), failure::Error> {
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
-            return Err(Error::UserError("Please specific the object"));
+            return Err(Error::UserError("Please specific the object").into());
         }
         self.request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())
             .map(|r| println!("{}", std::str::from_utf8(&r.0).unwrap_or("")))?;
@@ -873,36 +1003,36 @@ impl Handler<'_> {
         &mut self,
         src: &str,
         headers: &mut Vec<(&str, &str)>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), failure::Error> {
         debug!("headers: {:?}", headers);
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
-            return Err(Error::UserError("Please specific the object"));
+            return Err(Error::UserError("Please specific the object").into());
         }
         self.request("DELETE", &s3_object, &Vec::new(), headers, &Vec::new())?;
         Ok(())
     }
 
     /// Delete an object
-    pub fn del(&mut self, src: &str) -> Result<(), Error> {
+    pub fn del(&mut self, src: &str) -> Result<(), failure::Error> {
         self.del_with_flag(src, &mut Vec::new())
     }
 
     /// Make a new bucket
-    pub fn mb(&mut self, bucket: &str) -> Result<(), Error> {
+    pub fn mb(&mut self, bucket: &str) -> Result<(), failure::Error> {
         let s3_object = S3Object::from(bucket.to_string());
         if s3_object.bucket.is_none() {
-            return Err(Error::UserError("please specific the bucket name"));
+            return Err(Error::UserError("please specific the bucket name").into());
         }
         self.request("PUT", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())?;
         Ok(())
     }
 
     /// Remove a bucket
-    pub fn rb(&mut self, bucket: &str) -> Result<(), Error> {
+    pub fn rb(&mut self, bucket: &str) -> Result<(), failure::Error> {
         let s3_object = S3Object::from(bucket.to_string());
         if s3_object.bucket.is_none() {
-            return Err(Error::UserError("please specific the bucket name"));
+            return Err(Error::UserError("please specific the bucket name").into());
         }
         self.request(
             "DELETE",
@@ -915,12 +1045,12 @@ impl Handler<'_> {
     }
 
     /// list all tags of an object
-    pub fn list_tag(&mut self, target: &str) -> Result<(), Error> {
+    pub fn list_tag(&mut self, target: &str) -> Result<(), failure::Error> {
         let res: String;
         debug!("target: {:?}", target);
         let s3_object = S3Object::from(target.to_string());
         if s3_object.key.is_none() {
-            return Err(Error::UserError("Please specific the object"));
+            return Err(Error::UserError("Please specific the object").into());
         }
         let query_string = vec![("tagging", "")];
         res = std::str::from_utf8(
@@ -943,12 +1073,16 @@ impl Handler<'_> {
     }
 
     /// Put a tag on an object
-    pub fn add_tag(&mut self, target: &str, tags: &Vec<(&str, &str)>) -> Result<(), Error> {
+    pub fn add_tag(
+        &mut self,
+        target: &str,
+        tags: &Vec<(&str, &str)>,
+    ) -> Result<(), failure::Error> {
         debug!("target: {:?}", target);
         debug!("tags: {:?}", tags);
         let s3_object = S3Object::from(target.to_string());
         if s3_object.key.is_none() {
-            return Err(Error::UserError("Please specific the object"));
+            return Err(Error::UserError("Please specific the object").into());
         }
         let mut content = format!("<Tagging><TagSet>");
         for tag in tags {
@@ -972,11 +1106,11 @@ impl Handler<'_> {
     }
 
     /// Remove aa tag from an object
-    pub fn del_tag(&mut self, target: &str) -> Result<(), Error> {
+    pub fn del_tag(&mut self, target: &str) -> Result<(), failure::Error> {
         debug!("target: {:?}", target);
         let s3_object = S3Object::from(target.to_string());
         if s3_object.key.is_none() {
-            return Err(Error::UserError("Please specific the object"));
+            return Err(Error::UserError("Please specific the object").into());
         }
         let query_string = vec![("tagging", "")];
         self.request(
@@ -990,12 +1124,16 @@ impl Handler<'_> {
     }
 
     /// Show the usage of a bucket (CEPH only)
-    pub fn usage(&mut self, target: &str, options: &Vec<(&str, &str)>) -> Result<(), Error> {
+    pub fn usage(
+        &mut self,
+        target: &str,
+        options: &Vec<(&str, &str)>,
+    ) -> Result<(), failure::Error> {
         let s3_admin_bucket_object = S3Convert::new_from_uri("/admin/buckets".to_string());
         let s3_object = S3Object::from(target.to_string());
         let mut query_strings = options.clone();
         if s3_object.bucket.is_none() {
-            return Err(Error::UserError("S3 format not correct."));
+            return Err(Error::UserError("S3 format not correct.").into());
         };
         let bucket = s3_object.bucket.unwrap();
         query_strings.push(("bucket", &bucket));
@@ -1026,7 +1164,7 @@ impl Handler<'_> {
 
     /// Do a GET request for the specific URL
     /// This method is easily to show the configure of S3 not implemented
-    pub fn url_command(&mut self, url: &str) -> Result<(), Error> {
+    pub fn url_command(&mut self, url: &str) -> Result<(), failure::Error> {
         let s3_object;
         let mut raw_qs = String::new();
         let mut query_strings = Vec::new();
@@ -1066,11 +1204,25 @@ impl Handler<'_> {
             self.auth_type = AuthType::AWS4;
             self.format = Format::XML;
             self.url_style = UrlStyle::HOST;
+            self.s3_client = Box::new(AWS4Client {
+                tls: self.secure,
+                access_key: self.access_key,
+                secret_key: self.secret_key,
+                host: self.host,
+                region: self.region.clone().unwrap(),
+            });
             println!("using aws verion 4 signature, xml format, and host style url");
         } else if command.ends_with("ceph") {
             self.auth_type = AuthType::AWS4;
             self.format = Format::JSON;
             self.url_style = UrlStyle::PATH;
+            self.s3_client = Box::new(AWS4Client {
+                tls: self.secure,
+                access_key: self.access_key,
+                secret_key: self.secret_key,
+                host: self.host,
+                region: self.region.clone().unwrap(),
+            });
             println!("using aws verion 4 signature, json format, and path style url");
         } else {
             println!("usage: s3_type [aws/ceph]");
@@ -1091,9 +1243,21 @@ impl Handler<'_> {
     pub fn change_auth_type(&mut self, command: &str) {
         if command.ends_with("aws2") {
             self.auth_type = AuthType::AWS2;
+            self.s3_client = Box::new(AWS2Client {
+                tls: self.secure,
+                access_key: self.access_key,
+                secret_key: self.secret_key,
+            });
             println!("using aws version 2 signature");
         } else if command.ends_with("aws4") || command.ends_with("aws") {
             self.auth_type = AuthType::AWS4;
+            self.s3_client = Box::new(AWS4Client {
+                tls: self.secure,
+                access_key: self.access_key,
+                secret_key: self.secret_key,
+                host: self.host,
+                region: self.region.clone().unwrap(),
+            });
             println!("using aws verion 4 signature");
         } else {
             println!("usage: auth_type [aws4/aws2]");

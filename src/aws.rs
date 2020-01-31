@@ -115,7 +115,7 @@ impl S3Client for AWS2Client<'_> {
         action
             .body((*payload).clone())
             .send()
-            .map_err(|_| Error::ReqwestError())
+            .map_err(|e| Error::ReqwestError(format!("{:?}", e)))
             .and_then(|mut res| Ok(res.handle_response()))
     }
     fn redirect_parser(&self, _body: Vec<u8>, _format: Format) -> Result<String, Error> {
@@ -235,7 +235,7 @@ impl S3Client for AWS4Client<'_> {
         action
             .body((*payload).clone())
             .send()
-            .map_err(|_| Error::ReqwestError())
+            .map_err(|e| Error::ReqwestError(format!("{:?}", e)))
             .and_then(|mut res| Ok(res.handle_response()))
     }
     fn redirect_parser(&self, body: Vec<u8>, _format: Format) -> Result<String, Error> {
