@@ -985,15 +985,23 @@ impl Handler<'_> {
         Ok(())
     }
 
-    /// Show an object's content, this method is use for quick check a small object on the fly
-    pub fn cat(&mut self, src: &str) -> Result<(), failure::Error> {
+    /// Show the content and the content type of an object
+    pub fn cat(&mut self, src: &str) -> Result<(String, Option<String>), failure::Error> {
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
             return Err(Error::UserError("Please specific the object").into());
         }
-        self.request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())
-            .map(|r| println!("{}", std::str::from_utf8(&r.0).unwrap_or("")))?;
-        Ok(())
+        let (output, content_type) = self
+            .request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())
+            .map(|r| {
+                (
+                    format!("{}", std::str::from_utf8(&r.0).unwrap_or("")),
+                    r.1.get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+                        .and_then(|s| Some(s.to_string())),
+                )
+            })?;
+        Ok((output, content_type))
     }
 
     /// Delete with header flags for some deletion features
