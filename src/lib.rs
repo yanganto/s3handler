@@ -985,7 +985,7 @@ impl Handler<'_> {
         Ok(())
     }
 
-    /// Show an object's content, this method is use for quick check a small object on the fly
+    /// Show the content and the content type of an object
     pub fn cat(&mut self, src: &str) -> Result<(String, Option<String>), failure::Error> {
         let s3_object = S3Object::from(src.to_string());
         if s3_object.key.is_none() {
