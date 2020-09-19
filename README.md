@@ -4,5 +4,5 @@ s3handler
 
 
 s3handler
-a s3 handler library for [s3rs](https://github.com/yanganto/s3rs) and [s3fs](https://github.com/yanganto/s3fs)
+a s3 handler library for [s3rs](https://github.com/yanganto/s3rs) and [nu-shell s3 plugin](https://github.com/nushell/nushell/tree/main/crates/nu_plugin_s3)
 
