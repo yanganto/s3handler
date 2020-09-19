@@ -166,15 +166,22 @@ impl S3Client for AWS4Client<'_> {
         let request_headers_name: Vec<String> =
             headers.into_iter().map(|x| x.0.to_string()).collect();
 
-        let mut signed_headers = vec![("X-AMZ-Date", time_str.as_str()), ("Host", host)];
+        let mut signed_headers = vec![];
+        if request_headers_name.contains(&"content-type".to_string()) {
+            for h in headers.iter() {
+                if h.0 == "content-type" {
+                    request_headers.insert("content-type", h.1.parse().unwrap());
+                    signed_headers.push(("content-type", h.1));
+                }
+            }
+        }
+        signed_headers.append(&mut vec![("X-AMZ-Date", time_str.as_str()), ("Host", host)]);
 
         // Support AWS delete marker feature
-        if request_headers_name.contains(&"delete-marker".to_string()) {
-            for h in headers {
-                if h.0 == "delete-marker" {
-                    request_headers.insert("x-amz-delete-marker", h.1.parse().unwrap());
-                    signed_headers.push(("x-amz-delete-marker", h.1));
-                }
+        for h in headers {
+            if h.0 == "delete-marker" {
+                request_headers.insert("x-amz-delete-marker", h.1.parse().unwrap());
+                signed_headers.push(("x-amz-delete-marker", h.1));
             }
         }
 

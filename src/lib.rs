@@ -27,15 +27,16 @@ use std::fs::{metadata, write, File};
 use std::io::prelude::*;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::{mpsc, Arc, Mutex};
 
 use crate::aws::{AWS2Client, AWS4Client};
 use crate::error::Error;
+use mime_guess::from_path;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
 use reqwest::Response;
 use serde_json;
-use std::sync::{mpsc, Arc, Mutex};
 use url::Url;
 
 mod aws;
@@ -112,8 +113,11 @@ pub(crate) trait S3Client {
         method: &str,
         host: &str,
         uri: &str,
+
+        // TODO: refact these into HashMap and break api
         query_strings: &mut Vec<(&str, &str)>,
         headers: &mut Vec<(&str, &str)>,
+
         payload: &Vec<u8>,
     ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), Error>;
 
@@ -815,6 +819,13 @@ impl Handler<'_> {
 
         let mut content: Vec<u8>;
 
+        let gusess_mime = from_path(Path::new(file)).first_raw();
+        let mut headers = if let Some(mime) = gusess_mime {
+            vec![(reqwest::header::CONTENT_TYPE.as_str(), mime)]
+        } else {
+            Vec::new()
+        };
+
         if s3_object.key.is_none() {
             let file_name = Path::new(file).file_name().unwrap().to_string_lossy();
             s3_object.key = Some(format!("/{}", file_name));
@@ -823,7 +834,13 @@ impl Handler<'_> {
         if !Path::new(file).exists() && file == "test" {
             // TODO: add time info in the test file
             content = vec![83, 51, 82, 83, 32, 116, 101, 115, 116, 10]; // S3RS test/n
-            let _ = self.request("PUT", &s3_object, &Vec::new(), &mut Vec::new(), &content);
+            let _ = self.request(
+                "PUT",
+                &s3_object,
+                &Vec::new(),
+                &mut vec![(reqwest::header::CONTENT_TYPE.as_str(), "text/plain")],
+                &content,
+            );
         } else {
             let file_size = match metadata(Path::new(file)) {
                 Ok(m) => m.len(),
@@ -844,7 +861,7 @@ impl Handler<'_> {
                             "POST",
                             &s3_object,
                             &vec![("uploads", "")],
-                            &mut Vec::new(),
+                            &mut headers.clone(),
                             &Vec::new(),
                         )?
                         .0,
@@ -947,7 +964,7 @@ impl Handler<'_> {
                     "POST",
                     &s3_object,
                     &vec![("uploadId", upload_id.as_str())],
-                    &mut Vec::new(),
+                    &mut headers.clone(),
                     &content.into_bytes(),
                 )?;
                 info!("complete multipart");
@@ -955,7 +972,7 @@ impl Handler<'_> {
                 content = Vec::new();
                 let mut fin = File::open(file)?;
                 let _ = fin.read_to_end(&mut content);
-                let _ = self.request("PUT", &s3_object, &Vec::new(), &mut Vec::new(), &content)?;
+                let _ = self.request("PUT", &s3_object, &Vec::new(), &mut headers, &content)?;
             };
         }
         Ok(())
