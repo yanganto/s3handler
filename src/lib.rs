@@ -114,7 +114,7 @@ pub(crate) trait S3Client {
         host: &str,
         uri: &str,
 
-        // TODO: refact this into HashMap and break api
+        // TODO: refact these into HashMap and break api
         query_strings: &mut Vec<(&str, &str)>,
         headers: &mut Vec<(&str, &str)>,
 
