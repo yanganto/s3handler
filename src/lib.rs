@@ -20,7 +20,6 @@ extern crate colored;
 extern crate failure;
 extern crate url;
 
-use http::StatusCode;
 use std::cmp;
 use std::convert::From;
 use std::fs::{metadata, write, File};
@@ -35,7 +34,7 @@ use mime_guess::from_path;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
-use reqwest::Response;
+use reqwest::{blocking::Response, StatusCode};
 use serde_json;
 use url::Url;
 
@@ -208,14 +207,14 @@ impl From<String> for S3Object {
             };
             match url_parser.path() {
                 "/" | "" => S3Object {
-                    bucket: bucket,
+                    bucket,
                     key: None,
                     mtime: None,
                     etag: None,
                     storage_class: None,
                 },
                 _ => S3Object {
-                    bucket: bucket,
+                    bucket,
                     key: Some(url_parser.path().to_string()),
                     mtime: None,
                     etag: None,
@@ -313,11 +312,11 @@ impl S3Convert for S3Object {
         };
 
         S3Object {
-            bucket: bucket,
-            key: key,
-            mtime: mtime,
-            etag: etag,
-            storage_class: storage_class,
+            bucket,
+            key,
+            mtime,
+            etag,
+            storage_class,
         }
     }
 }
@@ -328,8 +327,7 @@ trait ResponseHandler {
 
 impl ResponseHandler for Response {
     fn handle_response(&mut self) -> (StatusCode, Vec<u8>, reqwest::header::HeaderMap) {
-        let mut body = Vec::new();
-        let _ = self.read_to_end(&mut body);
+        let body: Vec<u8> = self.bytes().map(|b| b.unwrap_or_default()).collect();
         if self.status().is_success() || self.status().is_redirection() {
             info!("Status: {}", self.status());
             info!("Headers:\n{:?}", self.headers());
