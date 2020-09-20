@@ -806,6 +806,129 @@ impl Handler<'_> {
         Ok(output)
     }
 
+    fn multipart_uplodad(
+        &mut self,
+        file: &str,
+        file_size: u64,
+        s3_object: S3Object,
+        headers: Vec<(&str, &str)>,
+    ) -> Result<(), failure::Error> {
+        let total_part_number = (file_size / 5242881 + 1) as usize;
+        debug!("upload file in {} parts", total_part_number);
+        let res = std::str::from_utf8(
+            &self
+                .request(
+                    "POST",
+                    &s3_object,
+                    &vec![("uploads", "")],
+                    &mut headers.clone(),
+                    &Vec::new(),
+                )?
+                .0,
+        )
+        .unwrap_or("")
+        .to_string();
+        let mut upload_id = "".to_string();
+        match self.format {
+            Format::JSON => {
+                let re = Regex::new(r#""UploadId":"(?P<upload_id>[^"]+)""#).unwrap();
+                let caps = re.captures(&res).expect("Upload ID missing");
+                upload_id = caps["upload_id"].to_string();
+            }
+            Format::XML => {
+                let mut reader = Reader::from_str(&res);
+                let mut in_tag = false;
+                let mut buf = Vec::new();
+
+                loop {
+                    match reader.read_event(&mut buf) {
+                        Ok(Event::Start(ref e)) => {
+                            if e.name() == b"UploadId" {
+                                in_tag = true;
+                            }
+                        }
+                        Ok(Event::End(ref e)) => {
+                            if e.name() == b"UploadId" {
+                                in_tag = false;
+                            }
+                        }
+                        Ok(Event::Text(e)) => {
+                            if in_tag {
+                                upload_id = e.unescape_and_decode(&reader).unwrap();
+                            }
+                        }
+                        Ok(Event::Eof) => break,
+                        Err(e) => return Err(Error::XMLParseError(e).into()),
+                        _ => (),
+                    }
+                    buf.clear();
+                }
+            }
+        }
+
+        info!("upload id: {}", upload_id);
+
+        let mut part = 0usize;
+        let mut fin = File::open(file)?;
+        let rp = UploadRequestPool::new(
+            self.auth_type,
+            self.secure,
+            Arc::new(self.access_key.to_string()),
+            Arc::new(self.secret_key.to_string()),
+            Arc::new(self.host.to_string()),
+            Arc::new(self.region.clone().unwrap_or("".to_string())),
+            Arc::new(upload_id.clone()),
+            // TODO: There are request TimedOut errors with multiple workers
+            cmp::min(1, total_part_number),
+            total_part_number,
+        );
+        let (host, uri) = match self.url_style {
+            UrlStyle::HOST => s3_object.virtural_host_style_links(self.domain_name.to_string()),
+            UrlStyle::PATH => s3_object.path_style_links(self.domain_name.to_string()),
+        };
+        loop {
+            part += 1;
+
+            let mut buffer = [0; 5242880];
+            let mut tail_buffer = Vec::new();
+            if part == total_part_number {
+                fin.read_to_end(&mut tail_buffer)?;
+            } else {
+                fin.read_exact(&mut buffer)?
+            }
+
+            if part == total_part_number {
+                rp.run(MiniUploadParameters {
+                    host: host.clone(),
+                    uri: uri.clone(),
+                    part_number: part,
+                    payload: tail_buffer,
+                });
+            } else {
+                rp.run(MiniUploadParameters {
+                    host: host.clone(),
+                    uri: uri.clone(),
+                    part_number: part,
+                    payload: buffer.to_vec().clone(),
+                });
+            };
+            if part * 5242880 >= (file_size as usize) {
+                break;
+            }
+        }
+
+        let content = rp.wait()?;
+        let _ = self.request(
+            "POST",
+            &s3_object,
+            &vec![("uploadId", upload_id.as_str())],
+            &mut headers.clone(),
+            &content.into_bytes(),
+        )?;
+        info!("complete multipart");
+        Ok(())
+    }
+
     /// Upload a file to a S3 bucket
     pub fn put(&mut self, file: &str, dest: &str) -> Result<(), failure::Error> {
         // TODO: handle XCOPY
@@ -849,123 +972,8 @@ impl Handler<'_> {
             };
 
             debug!("upload file size: {}", file_size);
-
             if file_size > 5242880 {
-                let total_part_number = (file_size / 5242881 + 1) as usize;
-                debug!("upload file in {} parts", total_part_number);
-                let res = std::str::from_utf8(
-                    &self
-                        .request(
-                            "POST",
-                            &s3_object,
-                            &vec![("uploads", "")],
-                            &mut headers.clone(),
-                            &Vec::new(),
-                        )?
-                        .0,
-                )
-                .unwrap_or("")
-                .to_string();
-                let mut upload_id = "".to_string();
-                match self.format {
-                    Format::JSON => {
-                        let re = Regex::new(r#""UploadId":"(?P<upload_id>[^"]+)""#).unwrap();
-                        let caps = re.captures(&res).expect("Upload ID missing");
-                        upload_id = caps["upload_id"].to_string();
-                    }
-                    Format::XML => {
-                        let mut reader = Reader::from_str(&res);
-                        let mut in_tag = false;
-                        let mut buf = Vec::new();
-
-                        loop {
-                            match reader.read_event(&mut buf) {
-                                Ok(Event::Start(ref e)) => {
-                                    if e.name() == b"UploadId" {
-                                        in_tag = true;
-                                    }
-                                }
-                                Ok(Event::End(ref e)) => {
-                                    if e.name() == b"UploadId" {
-                                        in_tag = false;
-                                    }
-                                }
-                                Ok(Event::Text(e)) => {
-                                    if in_tag {
-                                        upload_id = e.unescape_and_decode(&reader).unwrap();
-                                    }
-                                }
-                                Ok(Event::Eof) => break,
-                                Err(e) => return Err(Error::XMLParseError(e).into()),
-                                _ => (),
-                            }
-                            buf.clear();
-                        }
-                    }
-                }
-
-                info!("upload id: {}", upload_id);
-
-                let mut part = 0usize;
-                let mut fin = File::open(file)?;
-                let rp = UploadRequestPool::new(
-                    self.auth_type,
-                    self.secure,
-                    Arc::new(self.access_key.to_string()),
-                    Arc::new(self.secret_key.to_string()),
-                    Arc::new(self.host.to_string()),
-                    Arc::new(self.region.clone().unwrap_or("".to_string())),
-                    Arc::new(upload_id.clone()),
-                    // TODO: There are request TimedOut errors with multiple workers
-                    cmp::min(1, total_part_number),
-                    total_part_number,
-                );
-                let (host, uri) = match self.url_style {
-                    UrlStyle::HOST => {
-                        s3_object.virtural_host_style_links(self.domain_name.to_string())
-                    }
-                    UrlStyle::PATH => s3_object.path_style_links(self.domain_name.to_string()),
-                };
-                loop {
-                    part += 1;
-
-                    let mut buffer = [0; 5242880];
-                    let mut tail_buffer = Vec::new();
-                    if part == total_part_number {
-                        fin.read_to_end(&mut tail_buffer)?;
-                    } else {
-                        fin.read_exact(&mut buffer)?
-                    }
-
-                    if part == total_part_number {
-                        rp.run(MiniUploadParameters {
-                            host: host.clone(),
-                            uri: uri.clone(),
-                            part_number: part,
-                            payload: tail_buffer,
-                        });
-                    } else {
-                        rp.run(MiniUploadParameters {
-                            host: host.clone(),
-                            uri: uri.clone(),
-                            part_number: part,
-                            payload: buffer.to_vec().clone(),
-                        });
-                    };
-                    if part * 5242880 >= (file_size as usize) {
-                        break;
-                    }
-                }
-
-                let content = rp.wait()?;
-                let _ = self.request(
-                    "POST",
-                    &s3_object,
-                    &vec![("uploadId", upload_id.as_str())],
-                    &mut headers.clone(),
-                    &content.into_bytes(),
-                )?;
-                info!("complete multipart");
+                self.multipart_uplodad(file, file_size, s3_object, headers)?;
             } else {
                 content = Vec::new();
                 let mut fin = File::open(file)?;
