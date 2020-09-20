@@ -1,6 +1,6 @@
 [package]
 name = "s3handler"
-version = "0.5.2"
+version = "0.5.3"
 authors = ["Antonio Yang <antonio.yang@siliconmotion.com.tw>"]
 edition = "2018"
 description = "An s3 handler for s3rs s3fs"

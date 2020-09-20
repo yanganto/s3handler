@@ -26,10 +26,11 @@ use std::fs::{metadata, write, File};
 use std::io::prelude::*;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{mpsc, Arc, Mutex};
 
 use crate::aws::{AWS2Client, AWS4Client};
 use crate::error::Error;
+use crate::upload_pool::{MultiUploadParameters, UploadRequestPool, BYTE_PERPART};
+
 use mime_guess::from_path;
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -40,6 +41,7 @@ use url::Url;
 
 mod aws;
 mod error;
+mod upload_pool;
 
 static RESPONSE_CONTENT_FORMAT: &'static str =
     r#""Contents":\["([^"]+?)","([^"]+?)","\\"([^"]+?)\\"",([^"]+?),"([^"]+?)"(.*?)\]"#;
@@ -333,149 +335,17 @@ impl ResponseHandler for Response {
             info!("Headers:\n{:?}", self.headers());
             info!(
                 "Body:\n{}\n\n",
-                std::str::from_utf8(&body).expect("Body can not decode as UTF8")
+                std::str::from_utf8(&body).unwrap_or_default()
             );
         } else {
             error!("Status: {}", self.status());
             error!("Headers:\n{:?}", self.headers());
             error!(
                 "Body:\n{}\n\n",
-                std::str::from_utf8(&body).expect("Body can not decode as UTF8")
+                std::str::from_utf8(&body).unwrap_or_default()
             );
         }
         (self.status(), body, self.headers().clone())
-    }
-}
-
-struct MiniUploadParameters {
-    host: String,
-    uri: String,
-    part_number: usize,
-    payload: Vec<u8>,
-}
-
-struct UploadRequestPool {
-    ch_data: Option<mpsc::Sender<Box<MiniUploadParameters>>>,
-    ch_result: mpsc::Receiver<Result<(usize, reqwest::header::HeaderMap), Error>>,
-    total_reqwest: usize,
-}
-
-impl UploadRequestPool {
-    fn new(
-        auth_type: AuthType,
-        secure: bool,
-        access_key: Arc<String>,
-        secret_key: Arc<String>,
-        host: Arc<String>,
-        region: Arc<String>,
-        upload_id: Arc<String>,
-        n: usize,
-        total_reqwest: usize,
-    ) -> Self {
-        let (ch_s, ch_r) = mpsc::channel();
-        let a_ch_r = Arc::new(Mutex::new(ch_r));
-        let (ch_result_s, ch_result_r) = mpsc::channel();
-        let a_ch_result_s = Arc::new(Mutex::new(ch_result_s));
-
-        for _ in 0..n {
-            let a_ch_r2 = a_ch_r.clone();
-            let a_ch_result_s2 = a_ch_result_s.clone();
-            let upload = upload_id.clone();
-            let akey = access_key.clone();
-            let skey = secret_key.clone();
-            let h = host.clone();
-            let r = region.clone();
-
-            std::thread::spawn(move || loop {
-                // make S3 Client here
-                let s3_client: Box<dyn S3Client> = match auth_type {
-                    AuthType::AWS2 => Box::new(AWS2Client {
-                        tls: secure,
-                        access_key: &akey,
-                        secret_key: &skey,
-                    }),
-                    AuthType::AWS4 => Box::new(AWS4Client {
-                        tls: secure,
-                        access_key: &akey,
-                        secret_key: &skey,
-                        host: &h,
-                        region: r.to_string(),
-                    }),
-                };
-                let m = a_ch_r2.lock().unwrap();
-                let p: Box<MiniUploadParameters> = match m.recv() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let r = a_ch_result_s2.lock().unwrap();
-                        r.send(Err(Error::RequestPoolError(format!("{:?}", e))))
-                            .ok();
-                        drop(r);
-                        return;
-                    }
-                };
-                drop(m);
-                match s3_client.request(
-                    "PUT",
-                    &p.host,
-                    &p.uri,
-                    &mut vec![
-                        ("uploadId", upload.as_str()),
-                        ("partNumber", p.part_number.to_string().as_str()),
-                    ],
-                    &mut Vec::new(),
-                    &p.payload,
-                ) {
-                    Ok(r) => {
-                        info!("Part {} uploaded", p.part_number);
-                        let rs = a_ch_result_s2.lock().unwrap();
-                        rs.send(Ok((p.part_number.clone(), r.2))).unwrap();
-                        drop(rs);
-                    }
-                    Err(e) => {
-                        let rs = a_ch_result_s2.lock().unwrap();
-                        rs.send(Err(e)).unwrap();
-                        drop(rs);
-                    }
-                };
-            });
-        }
-        UploadRequestPool {
-            ch_data: Some(ch_s),
-            total_reqwest,
-            ch_result: ch_result_r,
-        }
-    }
-    fn run(&self, p: MiniUploadParameters) {
-        if let Some(ref ch_s) = self.ch_data {
-            ch_s.send(Box::new(p)).unwrap();
-        }
-    }
-    fn wait(mut self) -> Result<String, Error> {
-        self.ch_data.take();
-        let mut results = Vec::new();
-        loop {
-            results.push(self.ch_result.recv().unwrap());
-            info!("{} parts uploaded", results.len());
-            if results.len() == self.total_reqwest {
-                let mut content = format!("<CompleteMultipartUpload>");
-                for res in results {
-                    debug!("{:?}", res);
-                    let r = res?;
-                    let part = r.0;
-                    let etag = r.1[reqwest::header::ETAG]
-                        .to_str()
-                        .expect("unexpected etag from server");
-
-                    info!("part: {}, etag: {}", part, etag);
-                    content.push_str(&format!(
-                        "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
-                        part, etag
-                    ));
-                }
-                content.push_str(&format!("</CompleteMultipartUpload>"));
-                return Ok(content);
-            }
-        }
     }
 }
 
@@ -813,7 +683,7 @@ impl Handler<'_> {
         s3_object: S3Object,
         headers: Vec<(&str, &str)>,
     ) -> Result<(), failure::Error> {
-        let total_part_number = (file_size / 5242881 + 1) as usize;
+        let total_part_number = (file_size / BYTE_PERPART + 1) as usize;
         debug!("upload file in {} parts", total_part_number);
         let res = std::str::from_utf8(
             &self
@@ -870,17 +740,22 @@ impl Handler<'_> {
 
         let mut part = 0usize;
         let mut fin = File::open(file)?;
-        let rp = UploadRequestPool::new(
+        // Once we have retry mechanism in workers, we can make this bigger
+        // Magic number, I do not tune on this currently
+        let worker_number = cmp::min(10, total_part_number);
+        info!(
+            "{} part and {} workers to upload",
+            total_part_number, worker_number
+        );
+        let mut rp = UploadRequestPool::new(
             self.auth_type,
             self.secure,
-            Arc::new(self.access_key.to_string()),
-            Arc::new(self.secret_key.to_string()),
-            Arc::new(self.host.to_string()),
-            Arc::new(self.region.clone().unwrap_or("".to_string())),
-            Arc::new(upload_id.clone()),
-            // TODO: There are request TimedOut errors with multiple workers
-            cmp::min(1, total_part_number),
-            total_part_number,
+            self.access_key.to_string(),
+            self.secret_key.to_string(),
+            self.host.to_string(),
+            self.region.clone().unwrap_or("".to_string()),
+            upload_id.clone(),
+            worker_number,
         );
         let (host, uri) = match self.url_style {
             UrlStyle::HOST => s3_object.virtural_host_style_links(self.domain_name.to_string()),
@@ -889,7 +764,7 @@ impl Handler<'_> {
         loop {
             part += 1;
 
-            let mut buffer = [0; 5242880];
+            let mut buffer = [0; BYTE_PERPART as usize];
             let mut tail_buffer = Vec::new();
             if part == total_part_number {
                 fin.read_to_end(&mut tail_buffer)?;
@@ -898,21 +773,21 @@ impl Handler<'_> {
             }
 
             if part == total_part_number {
-                rp.run(MiniUploadParameters {
+                rp.run(MultiUploadParameters {
                     host: host.clone(),
                     uri: uri.clone(),
                     part_number: part,
                     payload: tail_buffer,
                 });
             } else {
-                rp.run(MiniUploadParameters {
+                rp.run(MultiUploadParameters {
                     host: host.clone(),
                     uri: uri.clone(),
                     part_number: part,
                     payload: buffer.to_vec().clone(),
                 });
             };
-            if part * 5242880 >= (file_size as usize) {
+            if part as u64 * BYTE_PERPART >= file_size {
                 break;
             }
         }
@@ -972,7 +847,7 @@ impl Handler<'_> {
             };
 
             debug!("upload file size: {}", file_size);
-            if file_size > 5242880 {
+            if file_size > BYTE_PERPART {
                 self.multipart_uplodad(file, file_size, s3_object, headers)?;
             } else {
                 content = Vec::new();
