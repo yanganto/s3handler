@@ -9,7 +9,7 @@ license = "MIT"
 [dependencies]
 serde = "1.0.43"
 serde_derive = "1.0.43"
-reqwest = { version = "0.10.8", features = [ "blocking" ] }  # TODO: use json feature and refact
+reqwest = { version = "0.10.8" }  # TODO: use json feature and refact
 hyper = "0.11.25"
 http = "0.1.13"
 chrono = "0.4"
@@ -29,3 +29,11 @@ colored = "^1.6.1"
 failure = "0.1.6"
 failure_derive ="0.1.6"
 mime_guess = "2.0.3"
+
+[features]
+default = [ "blocking" ]
+blocking = [
+    "reqwest/blocking"
+]
+"tokio" = []
+"async-std" = []
