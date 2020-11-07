@@ -57,6 +57,7 @@ pub trait DataPool: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokio::primitives::FilePool;
 
     #[test]
     fn test_canal_connect() {
