@@ -15,11 +15,8 @@ pub enum Error {
     ReqwestError(String),
     #[fail(display = "Error in RequestPool: {}", 0)]
     RequestPoolError(String),
-    #[fail(
-        display = "The resource location is not valid for DataPool({}): {}",
-        0, 1
-    )]
-    DataPoolLocationError(&'static str, String),
+    #[fail(display = "The resource with uncorrect scheme")]
+    SchemeError(),
 }
 
 impl From<std::io::Error> for Error {

@@ -1,46 +1,52 @@
-use super::primitives::{Canal, FilePool, ObjectDescription, PoolType};
+use url::Url;
+
+use super::primitives::{Canal, PoolType};
 use crate::error::Error;
+use crate::utils::S3Object;
 
 pub trait DataPool {
-    fn push(&self, desc: ObjectDescription, object: Vec<u8>) -> Result<(), Error>;
-    fn pull(&self, desc: ObjectDescription) -> Result<Vec<u8>, Error>;
-    fn list(&self, index: Option<ObjectDescription>) -> Result<Vec<ObjectDescription>, Error>;
-    fn remove(&self, desc: ObjectDescription) -> Result<(), Error>;
+    fn push(&self, desc: S3Object, object: Vec<u8>) -> Result<(), Error>;
+    fn pull(&self, desc: S3Object) -> Result<Vec<u8>, Error>;
+    fn list(&self, index: Option<S3Object>) -> Result<Vec<S3Object>, Error>;
+    fn remove(&self, desc: S3Object) -> Result<(), Error>;
     /// TODO: sync feature
     /// This method is for the sync feature
-    fn fetch_meta(&self, desc: &mut ObjectDescription) {
+    fn fetch_meta(&self, desc: &mut S3Object) {
         unimplemented!()
     }
-    fn _as_base_from(&self, downstream_object: ObjectDescription) -> Canal
+    fn check_scheme(&self, scheme: &str) -> Result<(), Error> {
+        Err(Error::SchemeError())
+    }
+    fn as_base_from(self, resource_location: &str) -> Result<Canal, Error>
     where
-        Self: Sized + Clone + 'static,
+        Self: Sized + 'static,
     {
-        Canal {
-            up_pool: Some(Box::new(self.clone())),
-            down_pool: None,
-            upstream_object: ObjectDescription::default(),
-            downstream_object,
-            default: PoolType::UpPool,
+        match Url::parse(resource_location) {
+            Ok(r) if self.check_scheme(r.scheme()).is_err() => Err(Error::SchemeError()),
+            _ => Ok(Canal {
+                up_pool: Some(Box::new(self)),
+                down_pool: None,
+                upstream_object: None,
+                downstream_object: Some(resource_location.to_string().into()),
+                default: PoolType::DownPool,
+            }),
         }
     }
-    fn as_base_from(&self, resource_location: &str) -> Result<Canal, Error>;
-    fn _as_target_to(&self, upstream_object: ObjectDescription) -> Canal
+    fn as_target_to(self, resource_location: &str) -> Result<Canal, Error>
     where
-        Self: Sized + Clone + 'static,
+        Self: Sized + 'static,
     {
-        Canal {
-            up_pool: Some(Box::new(self.clone())),
-            down_pool: None,
-            upstream_object,
-            downstream_object: ObjectDescription::default(),
-            default: PoolType::DownPool,
+        match Url::parse(resource_location) {
+            Ok(r) if self.check_scheme(r.scheme()).is_err() => Err(Error::SchemeError()),
+            _ => Ok(Canal {
+                up_pool: Some(Box::new(self)),
+                down_pool: None,
+                upstream_object: Some(resource_location.to_string().into()),
+                downstream_object: None,
+                default: PoolType::UpPool,
+            }),
         }
     }
-    fn as_target_to(
-        &self,
-        resource_location: &str,
-        upstream_object: ObjectDescription,
-    ) -> Result<Canal, Error>;
 }
 
 #[cfg(test)]

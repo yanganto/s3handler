@@ -37,3 +37,5 @@ blocking = [
 ]
 "tokio" = []
 "async-std" = []
+# remove api with duplicate function
+slim = []

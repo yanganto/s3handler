@@ -13,24 +13,51 @@
 //! let mut handler = s3handler::Handler::from(&config);
 //! let _ = handler.la();
 //! ```
-//! S3 async handler to manipulate objects and buckets.
-//! This treat all data as pool and create a canal to bridge two pool.
-//! It is easy to management and sync data from folder to S3, S3 to S3, event folder to folder.
-//! ```
-//! use s3handler::tokio::traits::DataPool;
 //!
-//! let pool = s3handler::tokio::primitives::S3Pool {
+//! Download a file with async api
+//! ```
+//! let s3_pool = s3handler::tokio::primitives::S3Pool {
 //!     host: "somewhere.in.the.world".to_string(),
 //!     access_key: "akey".to_string(),
 //!     secret_key: "skey".to_string(),
 //!     ..Default::default()
 //! };
-//! let unready_canal = pool.as_base_from("s3://bucket").unwrap();
-//! // the unready_canal is not connect
-//! assert!(!unready_canal.is_connect());
-//! let canal = unready_canal.toward("/path/to/another/folder").unwrap();
-//! // the canal is bridge the two folder and ready to transfer data between bucket and folder
+//! let obj = s3_pool.bucket("bucket_name").object("objcet_name");
+//! // obj.to_file("/path/to/save/a/file").await;
+//! ```
+//!
+//! S3 async handler to manipulate objects and buckets.
+//! This treat all data as pool and create a canal to bridge two pool.
+//! It is easy to management and sync data from folder to S3, S3 to S3, event folder to folder.
+//!
+//! """
+//!        +------+
+//!        | Pool | (UpPool)  modify by `from_*` api
+//!        +------+
+//!          |  ^
+//!     Pull |  | Push
+//!          v  |
+//!        +------+
+//!        | Pool | (DownPool) modify by `toward_*` api
+//!        +------+
+//! """
+//!
+//! ```
+//! use s3handler::tokio::traits::DataPool;
+//!
+//! let s3_pool = s3handler::tokio::primitives::S3Pool {
+//!     host: "somewhere.in.the.world".to_string(),
+//!     access_key: "akey".to_string(),
+//!     secret_key: "skey".to_string(),
+//!     ..Default::default()
+//! };
+//! let bucket = s3_pool.bucket("bucket_name");
+//! // Actually the bucket is a unconnnected canal
+//! assert!(!bucket.is_connect());
+//! let canal = bucket.toward("/path/to/another/folder").unwrap();
+//! // The canal bridges the two folder and ready to transfer data between bucket and folder
 //! assert!(canal.is_connect());
+//! // canal.sync().awit;
 //! ```
 
 //  use s3handler = { features = ["tokio"] }
@@ -133,7 +160,7 @@
 
 //  ```
 #[cfg(feature = "blocking")]
-pub use blocking::{CredentialConfig, Handler, S3Convert, S3Object};
+pub use blocking::{CredentialConfig, Handler};
 #[cfg(feature = "blocking")]
 mod blocking;
 
@@ -144,4 +171,6 @@ pub mod tokio;
 mod async_std;
 
 pub mod error;
+
+pub use utils::{S3Convert, S3Object};
 pub mod utils;
