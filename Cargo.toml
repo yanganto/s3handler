@@ -29,13 +29,18 @@ colored = "^1.6.1"
 failure = "0.1.6"
 failure_derive ="0.1.6"
 mime_guess = "2.0.3"
+async-trait = { version = "0.1.41", optional = true }
+tokio = { version = "0.3.3", optional = true }
 
 [features]
 default = [ "blocking" ]
 blocking = [
     "reqwest/blocking"
 ]
-"tokio" = []
-"async-std" = []
+"tokio-async" = [
+    "async-trait",
+    "tokio/fs"
+]
+"async-std-async" = []
 # remove api with duplicate function
 slim = []

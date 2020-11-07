@@ -12,7 +12,7 @@ cache: cargo
 jobs:
   include:
     - stage: "Check Tokio Feature"
-      script: cargo check --features=tokio
+      script: cargo check --features=tokio-async
     - stage: "Test"
       script: cargo test --verbose --all --all-features
     - stage: "Build"

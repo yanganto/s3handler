@@ -97,6 +97,7 @@ impl S3Convert for S3Object {
             None => (host, "/".to_string()),
         }
     }
+
     fn path_style_links(&self, host: String) -> (String, String) {
         match self.bucket.clone() {
             Some(b) => (
@@ -106,6 +107,7 @@ impl S3Convert for S3Object {
             None => (host, "/".to_string()),
         }
     }
+
     fn new_from_uri(uri: String) -> S3Object {
         let re = Regex::new(r#"/?(?P<bucket>[A-Za-z0-9\-\._]+)(?P<object>[A-Za-z0-9\-\._/]*)\s*"#)
             .unwrap();
@@ -128,6 +130,7 @@ impl S3Convert for S3Object {
             }
         }
     }
+
     fn new(
         bucket: Option<String>,
         object: Option<String>,

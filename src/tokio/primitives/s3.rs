@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use super::canal::{Canal, PoolType};
 use crate::error::Error;
 use crate::tokio::traits::DataPool;
@@ -16,18 +18,22 @@ pub struct S3Pool {
     pub secure: bool,
 }
 
+#[async_trait]
 impl DataPool for S3Pool {
-    fn push(&self, desc: S3Object, object: Vec<u8>) -> Result<(), Error> {
-        unimplemented!();
+    async fn push(&self, desc: S3Object, object: Vec<u8>) -> Result<(), Error> {
+        unimplemented!()
     }
-    fn pull(&self, desc: S3Object) -> Result<Vec<u8>, Error> {
-        unimplemented!();
+    async fn pull(&self, desc: S3Object) -> Result<Vec<u8>, Error> {
+        unimplemented!()
     }
-    fn list(&self, index: Option<S3Object>) -> Result<Vec<S3Object>, Error> {
-        unimplemented!();
+    async fn list(
+        &self,
+        index: Option<S3Object>,
+    ) -> Result<(Vec<S3Object>, Option<S3Object>), Error> {
+        unimplemented!()
     }
-    fn remove(&self, desc: S3Object) -> Result<(), Error> {
-        unimplemented!();
+    async fn remove(&self, desc: S3Object) -> Result<(), Error> {
+        unimplemented!()
     }
     fn check_scheme(&self, scheme: &str) -> Result<(), Error> {
         if scheme.to_lowercase() != "s3" {

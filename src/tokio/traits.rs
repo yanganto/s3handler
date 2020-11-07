@@ -1,14 +1,19 @@
+use async_trait::async_trait;
 use url::Url;
 
 use super::primitives::{Canal, PoolType};
 use crate::error::Error;
 use crate::utils::S3Object;
 
-pub trait DataPool {
-    fn push(&self, desc: S3Object, object: Vec<u8>) -> Result<(), Error>;
-    fn pull(&self, desc: S3Object) -> Result<Vec<u8>, Error>;
-    fn list(&self, index: Option<S3Object>) -> Result<Vec<S3Object>, Error>;
-    fn remove(&self, desc: S3Object) -> Result<(), Error>;
+#[async_trait]
+pub trait DataPool: Send + Sync {
+    async fn push(&self, desc: S3Object, object: Vec<u8>) -> Result<(), Error>;
+    async fn pull(&self, desc: S3Object) -> Result<Vec<u8>, Error>;
+    async fn list(
+        &self,
+        index: Option<S3Object>,
+    ) -> Result<(Vec<S3Object>, Option<S3Object>), Error>;
+    async fn remove(&self, desc: S3Object) -> Result<(), Error>;
     /// TODO: sync feature
     /// This method is for the sync feature
     fn fetch_meta(&self, desc: &mut S3Object) {
