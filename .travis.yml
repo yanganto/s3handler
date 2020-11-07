@@ -11,7 +11,9 @@ cache: cargo
 
 jobs:
   include:
+    - stage: "Check Tokio Feature"
+      script: cargo check --features=tokio
     - stage: "Test"
-      script: cargo test --verbose --all
+      script: cargo test --verbose --all --all-features
     - stage: "Build"
-      script: cargo build --verbose --all
+      script: cargo build --verbose --all --all-features
