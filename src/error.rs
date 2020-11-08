@@ -15,6 +15,12 @@ pub enum Error {
     ReqwestError(String),
     #[fail(display = "Error in RequestPool: {}", 0)]
     RequestPoolError(String),
+    #[fail(display = "The resource with uncorrect scheme")]
+    SchemeError(),
+    #[fail(display = "Write without bucket")]
+    ModifyEmptyBucketError(),
+    #[fail(display = "Pull bucket wihout object")]
+    PullEmptyObjectError(),
 }
 
 impl From<std::io::Error> for Error {

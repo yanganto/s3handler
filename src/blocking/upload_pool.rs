@@ -3,9 +3,10 @@ use std::fmt::Debug;
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::{thread, time};
 
-use crate::aws::{AWS2Client, AWS4Client};
+use crate::blocking::aws::{AWS2Client, AWS4Client};
+use crate::blocking::{AuthType, S3Client};
 use crate::error::Error;
-use crate::{AuthType, S3Client};
+use log::{debug, info};
 
 pub const BYTE_PERPART: u64 = 5242880;
 

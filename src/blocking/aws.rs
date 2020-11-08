@@ -1,19 +1,22 @@
-use crate::error::Error;
-use crate::{Format, ResponseHandler, S3Client};
+use std::str::FromStr;
+
 use base64::encode;
 use chrono::prelude::*;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 use hmac::{Hmac, Mac};
 use hmacsha1;
+use log::{debug, error};
 use md5;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::{blocking::Client, header, StatusCode};
 use rustc_serialize::hex::ToHex;
 use sha2::Sha256 as sha2_256;
-use std::str::FromStr;
 use url::form_urlencoded;
+
+use crate::blocking::{Format, ResponseHandler, S3Client};
+use crate::error::Error;
 
 pub(crate) struct AWS2Client<'a> {
     pub tls: bool,
