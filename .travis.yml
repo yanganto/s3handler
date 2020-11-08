@@ -11,9 +11,9 @@ cache: cargo
 
 jobs:
   include:
-    - stage: "Check Tokio Feature"
+    - stage: "Check - Tokio Async"
       script: cargo check --features=tokio-async
-    - stage: "Test"
-      script: cargo test --verbose --all --all-features
-    - stage: "Build"
-      script: cargo build --verbose --all --all-features
+    - stage: "Test - Tokio Async"
+      script: cargo test --verbose --features=tokio-async
+    - stage: "Build - Tokio Async"
+      script: cargo build --verbose --features=tokio-async

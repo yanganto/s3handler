@@ -1,7 +1,7 @@
 //! Initilize S3 handler to manipulate objects and buckets
 //! use s3handler = { features = ["blocking"] }
 //! ```
-//! let config = s3handler::CredentialConfig{
+//! let config = s3handler::blocking::CredentialConfig{
 //!     host: "s3.us-east-1.amazonaws.com".to_string(),
 //!     access_key: "akey".to_string(),
 //!     secret_key: "skey".to_string(),
@@ -10,13 +10,13 @@
 //!     s3_type: None, // default will try to config as AWS S3 handler
 //!     secure: None, // dafault is false, because the integrity protect by HMAC
 //! };
-//! let mut handler = s3handler::Handler::from(&config);
+//! let mut handler = s3handler::blocking::Handler::from(&config);
 //! let _ = handler.la();
 //! ```
 //!
 //! Download a file with async api
 //! ```
-//! let s3_pool = s3handler::tokio::primitives::S3Pool {
+//! let s3_pool = s3handler::none_blocking::primitives::S3Pool {
 //!     host: "somewhere.in.the.world".to_string(),
 //!     access_key: "akey".to_string(),
 //!     secret_key: "skey".to_string(),
@@ -43,9 +43,9 @@
 //! """
 //!
 //! ```
-//! use s3handler::tokio::traits::DataPool;
+//! use s3handler::none_blocking::traits::DataPool;
 //!
-//! let s3_pool = s3handler::tokio::primitives::S3Pool {
+//! let s3_pool = s3handler::none_blocking::primitives::S3Pool {
 //!     host: "somewhere.in.the.world".to_string(),
 //!     access_key: "akey".to_string(),
 //!     secret_key: "skey".to_string(),
@@ -61,17 +61,18 @@
 //! ```
 
 #[cfg(feature = "blocking")]
-pub use blocking::{CredentialConfig, Handler};
+pub mod blocking;
 #[cfg(feature = "blocking")]
-mod blocking;
-
-#[cfg(feature = "tokio")]
-pub mod tokio;
+pub use blocking::*;
 
 #[cfg(feature = "async-std")]
-mod async_std;
+mod async_std_async;
+
+#[cfg(feature = "tokio-async")]
+pub mod tokio_async;
+#[cfg(feature = "tokio-async")]
+pub use tokio_async as none_blocking;
 
 pub mod error;
-
 pub use utils::{S3Convert, S3Object};
 pub mod utils;
