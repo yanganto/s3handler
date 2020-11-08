@@ -7,7 +7,7 @@ A s3 handler library for [s3rs](https://github.com/yanganto/s3rs) and [nu-shell 
 Here is the [document](https://docs.rs/s3handler/).
 
 
-### Blocking API is readky
+### Blocking API is ready
 use s3handler = { version="0.5.3", features = ["blocking"] }
 
 ```rust
@@ -24,7 +24,7 @@ let mut handler = s3handler::Handler::from(&config);
 let _ = handler.la();
 ```
 
-### Async API is underdeveloping :wrench:
+### :wrench: :wrench: :wrench: Async API is underdeveloping 
 It is willing to take sugguestion.
 use s3handler = { features = ["tokio"] }
 
