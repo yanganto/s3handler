@@ -1,6 +1,6 @@
 use super::file::FilePool;
 use crate::error::Error;
-use crate::tokio::traits::DataPool;
+use crate::tokio_async::traits::DataPool;
 use crate::utils::S3Object;
 use url::Url;
 

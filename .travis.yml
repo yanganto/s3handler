@@ -9,11 +9,8 @@ matrix:
   fast_finish: true
 cache: cargo
 
-jobs:
-  include:
-    - stage: "Check Tokio Feature"
-      script: cargo check --features=tokio-async
-    - stage: "Test"
-      script: cargo test --verbose --all --all-features
-    - stage: "Build"
-      script: cargo build --verbose --all --all-features
+script:
+  - cargo check --verbose --features=tokio-async
+  - cargo test  --verbose --features=tokio-async
+  - cargo build --verbose --features=tokio-async
+

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use super::canal::{Canal, PoolType};
 use crate::error::Error;
-use crate::tokio::traits::DataPool;
+use crate::tokio_async::traits::DataPool;
 use crate::utils::S3Object;
 
 #[derive(Clone, Default)]
