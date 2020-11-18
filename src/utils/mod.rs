@@ -158,3 +158,19 @@ impl S3Convert for S3Object {
         }
     }
 }
+
+/// The request URL style
+pub enum UrlStyle {
+    /// Path style URL
+    /// The bucket name will be listed in the URI
+    PATH,
+    /// Virtual hosted URL
+    /// The bucket name will prefix on the host.
+    HOST,
+}
+
+impl Default for UrlStyle {
+    fn default() -> Self {
+        UrlStyle::PATH
+    }
+}

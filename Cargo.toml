@@ -41,6 +41,6 @@ blocking = [
     "async-trait",
     "tokio/fs"
 ]
-"async-std-async" = []
+# "std-async" = []
 # remove api with duplicate function
 slim = []

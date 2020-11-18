@@ -16,12 +16,8 @@
 //!
 //! Download a file with async api
 //! ```
-//! let s3_pool = s3handler::none_blocking::primitives::S3Pool {
-//!     host: "somewhere.in.the.world".to_string(),
-//!     access_key: "akey".to_string(),
-//!     secret_key: "skey".to_string(),
-//!     ..Default::default()
-//! };
+//! // Public resource
+//! let s3_pool = s3handler::none_blocking::primitives::S3Pool::new("somewhere.in.the.world".to_string());
 //! let obj = s3_pool.bucket("bucket_name").object("objcet_name");
 //! // obj.to_file("/path/to/save/a/file").await;
 //! ```
@@ -45,12 +41,9 @@
 //! ```
 //! use s3handler::none_blocking::traits::DataPool;
 //!
-//! let s3_pool = s3handler::none_blocking::primitives::S3Pool {
-//!     host: "somewhere.in.the.world".to_string(),
-//!     access_key: "akey".to_string(),
-//!     secret_key: "skey".to_string(),
-//!     ..Default::default()
-//! };
+//! // Resource with AWS version 2 auth
+//! let s3_pool = s3handler::none_blocking::primitives::S3Pool::new("somewhere.in.the.world".to_string())
+//!         .aws_v2("access-key".to_string(), "secrete-key".to_string());
 //! let bucket = s3_pool.bucket("bucket_name");
 //! // Actually the bucket is a unconnnected canal
 //! assert!(!bucket.is_connect());
@@ -65,8 +58,8 @@ pub mod blocking;
 #[cfg(feature = "blocking")]
 pub use blocking::*;
 
-#[cfg(feature = "async-std")]
-mod async_std_async;
+// #[cfg(feature = "std-async")]
+// pub mod async_std;
 
 #[cfg(feature = "tokio-async")]
 pub mod tokio_async;

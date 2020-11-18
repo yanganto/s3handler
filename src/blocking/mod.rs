@@ -21,6 +21,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::Error;
+pub use crate::utils::UrlStyle;
 use aws::{AWS2Client, AWS4Client};
 use upload_pool::{MultiUploadParameters, UploadRequestPool, BYTE_PERPART};
 
@@ -91,14 +92,6 @@ pub enum AuthType {
 pub enum Format {
     JSON,
     XML,
-}
-
-/// # The request URL style
-///
-/// CEPH support JSON and XML
-pub enum UrlStyle {
-    PATH,
-    HOST,
 }
 
 /// # The trait for S3Client

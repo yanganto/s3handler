@@ -26,7 +26,7 @@ pub(crate) struct AWS2Client<'a> {
 
 pub(crate) struct AWS4Client<'a> {
     pub tls: bool,
-    pub host: &'a str, // handle region redirect
+    pub host: &'a str,
     pub access_key: &'a str,
     pub secret_key: &'a str,
     pub region: String,
@@ -556,6 +556,7 @@ pub fn aws_v2_sign(secret_key: &str, data: &str) -> String {
 
     encode(code_bytes)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

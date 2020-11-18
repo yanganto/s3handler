@@ -30,6 +30,8 @@ impl Canal {
     pub fn is_connect(&self) -> bool {
         self.up_pool.is_some() && self.down_pool.is_some()
     }
+
+    // Begin of short cut api to file pool
     pub fn toward(mut self, resource_location: &str) -> Result<Self, Error> {
         let fp = FilePool {};
         match Url::parse(resource_location) {
@@ -52,6 +54,17 @@ impl Canal {
             }
         }
     }
+
+    pub fn download_file(mut self, resource_location: &str) -> Result<Self, Error> {
+        unimplemented!()
+    }
+
+    pub fn upload_file(mut self, resource_location: &str) -> Result<Self, Error> {
+        unimplemented!()
+    }
+    // End of short cut api to file pool
+
+    // Begin of setting api
     pub fn from_pool(&mut self, pool: Box<dyn DataPool>) {
         self.up_pool = Some(pool);
     }
@@ -180,16 +193,22 @@ impl Canal {
     pub fn from_path(&mut self, path: &str) {
         self.upstream_object = Some(path.to_string().into());
     }
-    // TODO: IO Part
-    // fn _list_by(self, pool_type: PoolType)
+    // End of setting api
+
+    // Begin of IO api
+    //
+    // pub async fn push(self)
+    // pub async fn pull(self)
+    //
     // pub async fn upstream_list(self)
     // pub async fn downstream_list(self)
     // pub async fn list(self)
+    //
     // pub async fn upstream_remove(self)
     // pub async fn downstream_remove(self)
     // pub async fn remove(self)
-    // pub async fn upstream_put(self)
-    // pub async fn downstream_put(self)
-    // pub async fn put(self)
+    //
     // pub async fn sync(self)
+    //
+    // End of IO api
 }
