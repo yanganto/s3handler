@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use tokio::fs::{create_dir, read, remove_dir_all, remove_file, write};
 
 use crate::error::Error;
@@ -14,7 +15,7 @@ unsafe impl Sync for FilePool {}
 
 #[async_trait]
 impl DataPool for FilePool {
-    async fn push(&self, desc: S3Object, object: Vec<u8>) -> Result<(), Error> {
+    async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error> {
         if let Some(b) = desc.bucket {
             let r = if let Some(k) = desc.key {
                 write(Path::new(&format!("{}{}", b, k)), object).await
@@ -26,7 +27,7 @@ impl DataPool for FilePool {
             Err(Error::ModifyEmptyBucketError())
         }
     }
-    async fn pull(&self, desc: S3Object) -> Result<Vec<u8>, Error> {
+    async fn pull(&self, desc: S3Object) -> Result<Bytes, Error> {
         if let S3Object {
             bucket: Some(b),
             key: Some(k),
@@ -34,7 +35,8 @@ impl DataPool for FilePool {
         } = desc
         {
             return match read(Path::new(&format!("{}{}", b, k))).await {
-                Ok(c) => Ok(c),
+                // TODO: figure ouput how to use Bytes in tolio
+                Ok(c) => Ok(Bytes::copy_from_slice(&c)),
                 Err(e) => Err(e.into()),
             };
         }

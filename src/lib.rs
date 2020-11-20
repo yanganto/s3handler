@@ -15,6 +15,7 @@
 //! ```
 //!
 //! Download a file with async api
+//! use s3handler = { features = ["tokio-async"] }
 //! ```
 //! // Public resource
 //! let s3_pool = s3handler::none_blocking::primitives::S3Pool::new("somewhere.in.the.world".to_string());

@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use reqwest::{header::HeaderMap, Client, Method, Request, Response, Url};
+use base64::encode;
+use bytes::Bytes;
+use reqwest::{header, Client, Method, Request, Url};
+use url::form_urlencoded;
 
 use super::canal::{Canal, PoolType};
 use crate::error::Error;
@@ -8,18 +11,18 @@ use crate::utils::{S3Object, UrlStyle};
 
 pub trait Authorizer: Send + Sync {
     /// This method will setup the header and put the authorize string
-    fn authorize(&self, requests: &mut Request) {
+    fn authorize(&self, _request: &mut Request) {
         unimplemented!()
     }
 
     /// This method will be called once the resource change the region stored
-    fn update_region(&self, region: String) {}
+    fn update_region(&mut self, _region: String) {}
 }
 
 pub struct PublicAuthorizer {}
 
 impl Authorizer for PublicAuthorizer {
-    fn authorize(&self, requests: &mut Request) {}
+    fn authorize(&self, _requests: &mut Request) {}
 }
 
 pub struct V2Authorizer {
@@ -46,10 +49,11 @@ impl V2Authorizer {
 }
 
 impl Authorizer for V2Authorizer {
-    fn authorize(&self, requests: &mut Request) {
-        // add AUTHORIZATION as  "{auth_str} {access_key}:{signature}"
-        // request_headers.insert(header::AUTHORIZATION, "");
-        unimplemented!()
+    fn authorize(&self, request: &mut Request) {
+        let signature = request.sign(&self.secret_key);
+        let authorize_string = format!("{} {}:{}", self.auth_str, self.access_key, signature);
+        let headers = request.headers_mut();
+        headers.insert(header::AUTHORIZATION, authorize_string.parse().unwrap());
     }
 }
 
@@ -98,8 +102,8 @@ impl V4Authorizer {
 }
 
 impl Authorizer for V4Authorizer {
-    fn update_region(&self, region: String) {
-        unimplemented!()
+    fn update_region(&mut self, region: String) {
+        self.region = region;
     }
 }
 
@@ -135,14 +139,14 @@ impl S3Pool {
 
 #[async_trait]
 impl DataPool for S3Pool {
-    async fn push(&self, desc: S3Object, object: Vec<u8>) -> Result<(), Error> {
+    async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error> {
         unimplemented!()
     }
-    async fn pull(&self, desc: S3Object) -> Result<Vec<u8>, Error> {
-        // let mut request: Request;
-        // self.authorizor.authorize(request).
-        // self.client.execute(request)
-        unimplemented!()
+    async fn pull(&self, desc: S3Object) -> Result<Bytes, Error> {
+        let mut request = Request::new(Method::GET, Url::parse("https://test/bucket/object")?);
+        self.authorizer.authorize(&mut request);
+        let r = self.client.execute(request).await?;
+        Ok(r.bytes().await?)
     }
     async fn list(
         &self,
@@ -170,5 +174,129 @@ impl S3Pool {
             downstream_object: None,
             default: PoolType::UpPool,
         }
+    }
+}
+
+pub trait Canonical {
+    fn canonical_query_string(&self) -> String;
+}
+
+impl Canonical for Request {
+    fn canonical_query_string(&self) -> String {
+        let mut encoded = form_urlencoded::Serializer::new(String::new());
+        let mut qs: Vec<(String, String)> = self
+            .url()
+            .query_pairs()
+            .into_iter()
+            .map(|(k, v)| (k.as_ref().to_owned(), v.as_ref().to_owned()))
+            .collect();
+
+        qs.sort_by(|x, y| x.0.cmp(&y.0));
+
+        for (key, value) in qs {
+            encoded.append_pair(&key, &value);
+        }
+
+        // There is a `~` in upload id, should be treated in a tricky way.
+        //
+        // >>>
+        // In the concatenated string, period characters (.) are not escaped.
+        // RFC 3986 considers the period character an unreserved character,
+        // so it is **not** URL encoded.
+        // >>>
+        //
+        // ref:
+        // https://docs.aws.amazon.com/general/latest/gr/signature-version-2.html#create-canonical-string
+        encoded.finish().replace("%7E", "~")
+    }
+}
+
+pub trait V2Signature
+where
+    Self: Canonical,
+{
+    fn string_to_signed(&self) -> String;
+    fn sign(&self, sign_key: &str) -> String;
+}
+
+impl V2Signature for Request {
+    fn string_to_signed(&self) -> String {
+        let url = self.url();
+        format!(
+            "{}\n{}\n{}\n{}",
+            self.method().as_str(),
+            url.host_str().unwrap_or_default(),
+            url.path(),
+            self.canonical_query_string()
+        )
+    }
+    fn sign(&self, sign_key: &str) -> String {
+        encode(&hmacsha1::hmac_sha1(
+            sign_key.as_bytes(),
+            self.string_to_signed().as_bytes(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_aws_v2_get_string_to_signed() {
+        let request = Request::new(
+            Method::GET,
+            Url::parse_with_params(
+                "http://elasticmapreduce.amazonaws.com",
+                &[
+                    ("Timestamp", "2011-10-03T15:19:30"),
+                    ("AWSAccessKeyId", "AKIAIOSFODNN7EXAMPLE"),
+                    ("Action", "DescribeJobFlows"),
+                    ("SignatureMethod", "HmacSHA256"),
+                    ("SignatureVersion", "2"),
+                    ("Version", "2009-03-31"),
+                ],
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            "GET\n\
+             elasticmapreduce.amazonaws.com\n\
+             /\n\
+             AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&\
+             Action=DescribeJobFlows&\
+             SignatureMethod=HmacSHA256&\
+             SignatureVersion=2&\
+             Timestamp=2011-10-03T15%3A19%3A30&\
+             Version=2009-03-31",
+            request.string_to_signed().as_str()
+        );
+    }
+
+    #[test]
+    fn test_aws_v2_get_string_to_signed2() {
+        let request = Request::new(
+            Method::GET,
+            Url::parse_with_params(
+                "http://elasticmapreduce.amazonaws.com",
+                &[
+                    ("Timestamp", "2011-10-03T15:19:30"),
+                    ("uploadId", "2~abcd"),
+                    ("SignatureVersion", "2"),
+                ],
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            "GET\n\
+             elasticmapreduce.amazonaws.com\n\
+             /\n\
+             SignatureVersion=2&\
+             Timestamp=2011-10-03T15%3A19%3A30&\
+             uploadId=2~abcd",
+            request.string_to_signed().as_str()
+        );
     }
 }
