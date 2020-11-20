@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn test_canal_connect() {
-        let resource = FilePool {};
+        let resource = FilePool::default();
         let folder = resource.as_base_from("/path/to/a/folder").unwrap();
         assert!(!folder.is_connect());
         let canal = folder.toward("/path/to/another/folder").unwrap();

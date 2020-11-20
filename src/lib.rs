@@ -20,7 +20,10 @@
 //! // Public resource
 //! let s3_pool = s3handler::none_blocking::primitives::S3Pool::new("somewhere.in.the.world".to_string());
 //! let obj = s3_pool.bucket("bucket_name").object("objcet_name");
-//! // obj.to_file("/path/to/save/a/file").await;
+//! async {
+//!     obj.download_file("/path/to/save/a/file").await;
+//! };
+//!
 //! ```
 //!
 //! S3 async handler to manipulate objects and buckets.

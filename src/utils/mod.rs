@@ -102,7 +102,7 @@ impl S3Convert for S3Object {
         match self.bucket.clone() {
             Some(b) => (
                 host,
-                format!("/{}{}", b, self.key.clone().unwrap_or("/".to_string())),
+                format!("/{}/{}", b, self.key.clone().unwrap_or("/".to_string())),
             ),
             None => (host, "/".to_string()),
         }

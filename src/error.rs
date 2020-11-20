@@ -23,6 +23,8 @@ pub enum Error {
     PullEmptyObjectError(),
     #[fail(display = "Resource url error: {}", 0)]
     ResourceUrlError(url::ParseError),
+    #[fail(display = "Pools should be initialized before pull or push on canal")]
+    PoolUninitializeError(),
 }
 
 impl From<std::io::Error> for Error {

@@ -1,14 +1,18 @@
+use std::fmt;
+
 use super::file::FilePool;
 use crate::error::Error;
 use crate::tokio_async::traits::DataPool;
 use crate::utils::S3Object;
 use url::Url;
 
+#[derive(Debug)]
 pub enum PoolType {
     UpPool,
     DownPool,
 }
 
+#[derive(Debug)]
 pub struct Canal {
     pub up_pool: Option<Box<dyn DataPool>>,
     pub down_pool: Option<Box<dyn DataPool>>,
@@ -25,6 +29,11 @@ pub struct Canal {
     // upstream_obj_desc_lambda:
     // downstream_obj_desc_lambda:
 }
+impl fmt::Debug for dyn DataPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Dynamic DataPool").finish()
+    }
+}
 
 impl Canal {
     pub fn is_connect(&self) -> bool {
@@ -33,7 +42,7 @@ impl Canal {
 
     // Begin of short cut api to file pool
     pub fn toward(mut self, resource_location: &str) -> Result<Self, Error> {
-        let fp = FilePool {};
+        let fp = FilePool::default();
         match Url::parse(resource_location) {
             Ok(r) if fp.check_scheme(r.scheme()).is_err() => Err(Error::SchemeError()),
             _ => {
@@ -44,7 +53,7 @@ impl Canal {
         }
     }
     pub fn from(mut self, resource_location: &str) -> Result<Self, Error> {
-        let fp = FilePool {};
+        let fp = FilePool::default();
         match Url::parse(resource_location) {
             Ok(r) if fp.check_scheme(r.scheme()).is_err() => Err(Error::SchemeError()),
             _ => {
@@ -55,11 +64,19 @@ impl Canal {
         }
     }
 
-    pub fn download_file(mut self, resource_location: &str) -> Result<Self, Error> {
-        unimplemented!()
+    pub async fn download_file(mut self, resource_location: &str) -> Result<(), Error> {
+        let fp = FilePool::default();
+        match Url::parse(resource_location) {
+            Ok(r) if fp.check_scheme(r.scheme()).is_err() => Err(Error::SchemeError()),
+            _ => {
+                self.toward_pool(Box::new(fp));
+                self.downstream_object = Some(resource_location.to_string().into());
+                Ok(self.pull().await?)
+            }
+        }
     }
 
-    pub fn upload_file(mut self, resource_location: &str) -> Result<Self, Error> {
+    pub fn upload_file(mut self, resource_location: &str) -> Result<(), Error> {
         unimplemented!()
     }
     // End of short cut api to file pool
@@ -196,9 +213,24 @@ impl Canal {
     // End of setting api
 
     // Begin of IO api
-    //
     // pub async fn push(self)
-    // pub async fn pull(self)
+    pub async fn pull(self) -> Result<(), Error> {
+        match (self.up_pool, self.down_pool) {
+            (Some(up_pool), Some(down_pool)) => {
+                let b = up_pool
+                    .pull(self.upstream_object.expect("should be upstream object"))
+                    .await?;
+                down_pool
+                    .push(
+                        self.downstream_object.expect("should be downstream object"),
+                        b,
+                    )
+                    .await?;
+                Ok(())
+            }
+            _ => Err(Error::PoolUninitializeError()),
+        }
+    }
     //
     // pub async fn upstream_list(self)
     // pub async fn downstream_list(self)

@@ -9,7 +9,18 @@ use crate::tokio_async::traits::DataPool;
 use crate::utils::S3Object;
 
 #[derive(Clone)]
-pub struct FilePool {}
+pub struct FilePool {
+    /// use "/" for *nix, "C://" for windows (not tested)
+    pub drive: String,
+}
+impl Default for FilePool {
+    fn default() -> Self {
+        // TODO: match OS type and do better
+        Self {
+            drive: "/".to_string(),
+        }
+    }
+}
 unsafe impl Send for FilePool {}
 unsafe impl Sync for FilePool {}
 
@@ -18,7 +29,7 @@ impl DataPool for FilePool {
     async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error> {
         if let Some(b) = desc.bucket {
             let r = if let Some(k) = desc.key {
-                write(Path::new(&format!("{}{}", b, k)), object).await
+                write(Path::new(&format!("{}{}{}", self.drive, b, k)), object).await
             } else {
                 create_dir(Path::new(&b)).await
             };
@@ -35,7 +46,7 @@ impl DataPool for FilePool {
         } = desc
         {
             return match read(Path::new(&format!("{}{}", b, k))).await {
-                // TODO: figure ouput how to use Bytes in tolio
+                // TODO: figure ouput how to use Bytes in tokio
                 Ok(c) => Ok(Bytes::copy_from_slice(&c)),
                 Err(e) => Err(e.into()),
             };
