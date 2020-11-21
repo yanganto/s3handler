@@ -42,42 +42,26 @@ impl Canal {
 
     // Begin of short cut api to file pool
     pub fn toward(mut self, resource_location: &str) -> Result<Self, Error> {
-        let fp = FilePool::default();
-        match Url::parse(resource_location) {
-            Ok(r) if fp.check_scheme(r.scheme()).is_err() => Err(Error::SchemeError()),
-            _ => {
-                self.toward_pool(Box::new(fp));
-                self.upstream_object = Some(resource_location.to_string().into());
-                Ok(self)
-            }
-        }
+        self.toward_pool(Box::new(FilePool::new(resource_location)?));
+        self.upstream_object = Some(resource_location.to_string().into());
+        Ok(self)
     }
     pub fn from(mut self, resource_location: &str) -> Result<Self, Error> {
-        let fp = FilePool::default();
-        match Url::parse(resource_location) {
-            Ok(r) if fp.check_scheme(r.scheme()).is_err() => Err(Error::SchemeError()),
-            _ => {
-                self.from_pool(Box::new(fp));
-                self.downstream_object = Some(resource_location.to_string().into());
-                Ok(self)
-            }
-        }
+        self.from_pool(Box::new(FilePool::new(resource_location)?));
+        self.downstream_object = Some(resource_location.to_string().into());
+        Ok(self)
     }
 
     pub async fn download_file(mut self, resource_location: &str) -> Result<(), Error> {
-        let fp = FilePool::default();
-        match Url::parse(resource_location) {
-            Ok(r) if fp.check_scheme(r.scheme()).is_err() => Err(Error::SchemeError()),
-            _ => {
-                self.toward_pool(Box::new(fp));
-                self.downstream_object = Some(resource_location.to_string().into());
-                Ok(self.pull().await?)
-            }
-        }
+        self.toward_pool(Box::new(FilePool::new(resource_location)?));
+        self.downstream_object = Some(resource_location.to_string().into());
+        Ok(self.pull().await?)
     }
 
-    pub fn upload_file(mut self, resource_location: &str) -> Result<(), Error> {
-        unimplemented!()
+    pub async fn upload_file(mut self, resource_location: &str) -> Result<(), Error> {
+        self.toward_pool(Box::new(FilePool::new(resource_location)?));
+        self.downstream_object = Some(resource_location.to_string().into());
+        Ok(self.push().await?)
     }
     // End of short cut api to file pool
 
@@ -213,13 +197,32 @@ impl Canal {
     // End of setting api
 
     // Begin of IO api
-    // pub async fn push(self)
+    pub async fn push(self) -> Result<(), Error> {
+        match (self.up_pool, self.down_pool) {
+            (Some(up_pool), Some(down_pool)) => {
+                let b = down_pool
+                    .pull(self.downstream_object.expect("should be upstream object"))
+                    .await?;
+                // TODO: make a default for target if unset
+                up_pool
+                    .push(
+                        self.upstream_object.expect("should be downstream object"),
+                        b,
+                    )
+                    .await?;
+                Ok(())
+            }
+            _ => Err(Error::PoolUninitializeError()),
+        }
+    }
+
     pub async fn pull(self) -> Result<(), Error> {
         match (self.up_pool, self.down_pool) {
             (Some(up_pool), Some(down_pool)) => {
                 let b = up_pool
                     .pull(self.upstream_object.expect("should be upstream object"))
                     .await?;
+                // TODO: make a default for target if unset
                 down_pool
                     .push(
                         self.downstream_object.expect("should be downstream object"),
@@ -231,6 +234,36 @@ impl Canal {
             _ => Err(Error::PoolUninitializeError()),
         }
     }
+    pub async fn remove(self) -> Result<(), Error> {
+        match self.default {
+            PoolType::UpPool => {
+                if let Some(upstream_object) = self.upstream_object {
+                    Ok(self
+                        .up_pool
+                        .expect("default pool exists")
+                        .remove(upstream_object)
+                        .await?)
+                } else {
+                    return Err(Error::ResourceUrlError(
+                        "can not remove on an object withouput setup".to_string(),
+                    ));
+                }
+            }
+            PoolType::DownPool => {
+                if let Some(downstream_object) = self.downstream_object {
+                    Ok(self
+                        .down_pool
+                        .expect("default pool exists")
+                        .remove(downstream_object)
+                        .await?)
+                } else {
+                    return Err(Error::ResourceUrlError(
+                        "can not remove on an object withouput setup".to_string(),
+                    ));
+                }
+            }
+        }
+    }
     //
     // pub async fn upstream_list(self)
     // pub async fn downstream_list(self)
@@ -238,9 +271,7 @@ impl Canal {
     //
     // pub async fn upstream_remove(self)
     // pub async fn downstream_remove(self)
-    // pub async fn remove(self)
     //
     // pub async fn sync(self)
-    //
     // End of IO api
 }

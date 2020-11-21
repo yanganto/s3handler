@@ -1,8 +1,9 @@
-use std::path::Path;
+use std::{env, path::Path};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::fs::{create_dir, read, remove_dir_all, remove_file, write};
+use url::Url;
 
 use crate::error::Error;
 use crate::tokio_async::traits::DataPool;
@@ -15,10 +16,32 @@ pub struct FilePool {
 }
 impl Default for FilePool {
     fn default() -> Self {
-        // TODO: match OS type and do better
         Self {
-            drive: "/".to_string(),
+            drive: env::current_dir()
+                .expect("current dir is undetected")
+                .to_str()
+                .expect("current dir is not valid string")
+                .into(),
         }
+    }
+}
+
+impl FilePool {
+    pub fn new(path: &str) -> Result<Self, Error> {
+        let mut fp = FilePool::default();
+        if path.starts_with("/") {
+            fp.drive = "/".to_string();
+        } else {
+            match Url::parse(path) {
+                Ok(r) => {
+                    if ["s3", "S3"].contains(&r.scheme()) {
+                        return Err(Error::SchemeError());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(fp)
     }
 }
 unsafe impl Send for FilePool {}
@@ -45,7 +68,7 @@ impl DataPool for FilePool {
             ..
         } = desc
         {
-            return match read(Path::new(&format!("{}{}", b, k))).await {
+            return match read(Path::new(&format!("{}{}{}", self.drive, b, k))).await {
                 // TODO: figure ouput how to use Bytes in tokio
                 Ok(c) => Ok(Bytes::copy_from_slice(&c)),
                 Err(e) => Err(e.into()),
@@ -72,10 +95,6 @@ impl DataPool for FilePool {
         }
     }
     fn check_scheme(&self, scheme: &str) -> Result<(), Error> {
-        if scheme.to_lowercase() != "file" {
-            Err(Error::SchemeError())
-        } else {
-            Ok(())
-        }
+        unimplemented!()
     }
 }

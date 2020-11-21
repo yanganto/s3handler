@@ -22,7 +22,7 @@ pub enum Error {
     #[fail(display = "Pull bucket wihout object")]
     PullEmptyObjectError(),
     #[fail(display = "Resource url error: {}", 0)]
-    ResourceUrlError(url::ParseError),
+    ResourceUrlError(String),
     #[fail(display = "Pools should be initialized before pull or push on canal")]
     PoolUninitializeError(),
 }
@@ -41,7 +41,7 @@ impl From<&'static str> for Error {
 
 impl From<url::ParseError> for Error {
     fn from(err: url::ParseError) -> Self {
-        Error::ResourceUrlError(err)
+        Error::ResourceUrlError(err.to_string())
     }
 }
 

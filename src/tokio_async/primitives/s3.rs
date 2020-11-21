@@ -3,7 +3,7 @@ use base64::encode;
 use bytes::Bytes;
 use chrono::prelude::*;
 use reqwest::{
-    header::{self, HeaderValue},
+    header::{self, HeaderMap, HeaderValue},
     Client, Method, Request, Url,
 };
 use url::form_urlencoded;
@@ -129,6 +129,11 @@ pub struct S3Pool {
     /// because Virtual hosted URLs may be supported for non-SSL requests only.
     pub url_style: UrlStyle,
 
+    /// The part size for multipart, default disabled.
+    /// If Some the pull/push will check out the object size first and do mulitpart
+    /// If None download and upload will be in one part
+    pub part_size: Option<usize>,
+
     client: Client,
 
     pub authorizer: Box<dyn Authorizer>,
@@ -142,42 +147,69 @@ impl S3Pool {
             url_style: UrlStyle::PATH,
             client: Client::new(),
             authorizer: Box::new(PublicAuthorizer {}),
+            part_size: None,
         }
     }
     pub fn aws_v2(mut self, access_key: String, secret_key: String) -> Self {
         self.authorizer = Box::new(V2Authorizer::new(access_key, secret_key));
         self
     }
+
+    pub fn endpoint(&self, desc: S3Object) -> String {
+        let (host, uri) = match self.url_style {
+            UrlStyle::PATH => desc.path_style_links(self.host.clone()),
+            UrlStyle::HOST => desc.virtural_host_style_links(self.host.clone()),
+        };
+        if self.secure {
+            format!("https://{}{}", host, uri)
+        } else {
+            format!("http://{}{}", host, uri)
+        }
+    }
+
+    pub fn init_headers(&self, headers: &mut HeaderMap) {
+        headers.insert(
+            header::DATE,
+            HeaderValue::from_str(Utc::now().to_rfc2822().as_str()).unwrap(),
+        );
+        headers.insert(header::HOST, HeaderValue::from_str(&self.host).unwrap());
+    }
 }
 
 #[async_trait]
 impl DataPool for S3Pool {
     async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error> {
-        unimplemented!()
+        if let Some(part_size) = self.part_size {
+            // TODO mulitipart
+            unimplemented!()
+        } else {
+            // TODO reuse the client setting and not only the reqest
+            let mut request = self.client.put(&self.endpoint(desc)).body(object).build()?;
+
+            self.init_headers(request.headers_mut());
+            self.authorizer.authorize(&mut request);
+
+            let _r = self.client.execute(request).await?;
+            // TODO validate status code
+        }
+        Ok(())
     }
     async fn pull(&self, desc: S3Object) -> Result<Bytes, Error> {
-        let endpoint = {
-            let (host, uri) = match self.url_style {
-                UrlStyle::PATH => desc.path_style_links(self.host.clone()),
-                UrlStyle::HOST => desc.virtural_host_style_links(self.host.clone()),
-            };
-            if self.secure {
-                format!("https://{}{}", host, uri)
-            } else {
-                format!("http://{}{}", host, uri)
-            }
-        };
-        let mut request = Request::new(Method::GET, Url::parse(&endpoint)?);
-        let time_str = Utc::now().to_rfc2822();
-        let headers = request.headers_mut();
-        headers.insert(
-            header::DATE,
-            HeaderValue::from_str(time_str.as_str()).unwrap(),
-        );
-        headers.insert(header::HOST, HeaderValue::from_str(&self.host).unwrap());
-        self.authorizer.authorize(&mut request);
-        let r = self.client.execute(request).await?;
-        Ok(r.bytes().await?)
+        if let Some(part_size) = self.part_size {
+            // TODO mulitipart
+            unimplemented!()
+        } else {
+            // TODO reuse the client setting and not only the reqest
+            let mut request = Request::new(Method::GET, Url::parse(&self.endpoint(desc))?);
+
+            self.init_headers(request.headers_mut());
+            self.authorizer.authorize(&mut request);
+
+            let r = self.client.execute(request).await?;
+
+            // TODO validate status code
+            Ok(r.bytes().await?)
+        }
     }
     async fn list(
         &self,
@@ -186,7 +218,14 @@ impl DataPool for S3Pool {
         unimplemented!()
     }
     async fn remove(&self, desc: S3Object) -> Result<(), Error> {
-        unimplemented!()
+        let mut request = Request::new(Method::DELETE, Url::parse(&self.endpoint(desc))?);
+
+        self.init_headers(request.headers_mut());
+        self.authorizer.authorize(&mut request);
+
+        let _r = self.client.execute(request).await?;
+        // TODO validate status code
+        Ok(())
     }
     fn check_scheme(&self, scheme: &str) -> Result<(), Error> {
         if scheme.to_lowercase() != "s3" {
@@ -266,67 +305,4 @@ impl V2Signature for Request {
             self.string_to_signed().as_bytes(),
         ))
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // #[test]
-    // fn test_aws_v2_get_string_to_signed() {
-    //     let request = Request::new(
-    //         Method::GET,
-    //         Url::parse_with_params(
-    //             "http://elasticmapreduce.amazonaws.com",
-    //             &[
-    //                 ("Timestamp", "2011-10-03T15:19:30"),
-    //                 ("AWSAccessKeyId", "AKIAIOSFODNN7EXAMPLE"),
-    //                 ("Action", "DescribeJobFlows"),
-    //                 ("SignatureMethod", "HmacSHA256"),
-    //                 ("SignatureVersion", "2"),
-    //                 ("Version", "2009-03-31"),
-    //             ],
-    //         )
-    //         .unwrap(),
-    //     );
-
-    //     assert_eq!(
-    //         "GET\n\
-    //          elasticmapreduce.amazonaws.com\n\
-    //          /\n\
-    //          AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&\
-    //          Action=DescribeJobFlows&\
-    //          SignatureMethod=HmacSHA256&\
-    //          SignatureVersion=2&\
-    //          Timestamp=2011-10-03T15%3A19%3A30&\
-    //          Version=2009-03-31",
-    //         request.string_to_signed().as_str()
-    //     );
-    // }
-
-    // #[test]
-    // fn test_aws_v2_get_string_to_signed2() {
-    //     let request = Request::new(
-    //         Method::GET,
-    //         Url::parse_with_params(
-    //             "http://elasticmapreduce.amazonaws.com",
-    //             &[
-    //                 ("Timestamp", "2011-10-03T15:19:30"),
-    //                 ("uploadId", "2~abcd"),
-    //                 ("SignatureVersion", "2"),
-    //             ],
-    //         )
-    //         .unwrap(),
-    //     );
-
-    //     assert_eq!(
-    //         "GET\n\
-    //          elasticmapreduce.amazonaws.com\n\
-    //          /\n\
-    //          SignatureVersion=2&\
-    //          Timestamp=2011-10-03T15%3A19%3A30&\
-    //          uploadId=2~abcd",
-    //         request.string_to_signed().as_str()
-    //     );
-    // }
 }
