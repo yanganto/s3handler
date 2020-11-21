@@ -587,8 +587,8 @@ mod tests {
              Action=DescribeJobFlows&\
              SignatureMethod=HmacSHA256&\
              SignatureVersion=2&\
-             Timestamp=2011-10-03T15%3A19%3A30\
-             &Version=2009-03-31",
+             Timestamp=2011-10-03T15%3A19%3A30&\
+             Version=2009-03-31",
             string_need_signed.as_str()
         );
     }

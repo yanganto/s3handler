@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use bytes::Bytes;
 use url::Url;
 
 use super::primitives::{Canal, PoolType};
@@ -7,8 +8,8 @@ use crate::utils::S3Object;
 
 #[async_trait]
 pub trait DataPool: Send + Sync {
-    async fn push(&self, desc: S3Object, object: Vec<u8>) -> Result<(), Error>;
-    async fn pull(&self, desc: S3Object) -> Result<Vec<u8>, Error>;
+    async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error>;
+    async fn pull(&self, desc: S3Object) -> Result<Bytes, Error>;
     async fn list(
         &self,
         index: Option<S3Object>,
@@ -61,7 +62,7 @@ mod tests {
 
     #[test]
     fn test_canal_connect() {
-        let resource = FilePool {};
+        let resource = FilePool::default();
         let folder = resource.as_base_from("/path/to/a/folder").unwrap();
         assert!(!folder.is_connect());
         let canal = folder.toward("/path/to/another/folder").unwrap();
