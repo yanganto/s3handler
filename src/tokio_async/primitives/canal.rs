@@ -4,7 +4,6 @@ use super::file::FilePool;
 use crate::error::Error;
 use crate::tokio_async::traits::DataPool;
 use crate::utils::S3Object;
-use url::Url;
 
 #[derive(Debug)]
 pub enum PoolType {
@@ -234,43 +233,44 @@ impl Canal {
             _ => Err(Error::PoolUninitializeError()),
         }
     }
-    pub async fn remove(self) -> Result<(), Error> {
-        match self.default {
-            PoolType::UpPool => {
-                if let Some(upstream_object) = self.upstream_object {
-                    Ok(self
-                        .up_pool
-                        .expect("default pool exists")
-                        .remove(upstream_object)
-                        .await?)
-                } else {
-                    return Err(Error::ResourceUrlError(
-                        "can not remove on an object withouput setup".to_string(),
-                    ));
-                }
-            }
-            PoolType::DownPool => {
-                if let Some(downstream_object) = self.downstream_object {
-                    Ok(self
-                        .down_pool
-                        .expect("default pool exists")
-                        .remove(downstream_object)
-                        .await?)
-                } else {
-                    return Err(Error::ResourceUrlError(
-                        "can not remove on an object withouput setup".to_string(),
-                    ));
-                }
-            }
+
+    pub async fn upstream_remove(self) -> Result<(), Error> {
+        if let Some(upstream_object) = self.upstream_object {
+            Ok(self
+                .up_pool
+                .expect("default pool exists")
+                .remove(upstream_object)
+                .await?)
+        } else {
+            return Err(Error::ResourceUrlError(
+                "can not remove on an object withouput setup".to_string(),
+            ));
         }
     }
-    //
+
+    pub async fn downstream_remove(self) -> Result<(), Error> {
+        if let Some(downstream_object) = self.downstream_object {
+            Ok(self
+                .down_pool
+                .expect("default pool exists")
+                .remove(downstream_object)
+                .await?)
+        } else {
+            return Err(Error::ResourceUrlError(
+                "can not remove on an object withouput setup".to_string(),
+            ));
+        }
+    }
+
+    pub async fn remove(self) -> Result<(), Error> {
+        match self.default {
+            PoolType::UpPool => self.upstream_remove().await,
+            PoolType::DownPool => self.downstream_remove().await,
+        }
+    }
     // pub async fn upstream_list(self)
     // pub async fn downstream_list(self)
     // pub async fn list(self)
-    //
-    // pub async fn upstream_remove(self)
-    // pub async fn downstream_remove(self)
     //
     // pub async fn sync(self)
     // End of IO api

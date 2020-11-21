@@ -94,7 +94,7 @@ impl DataPool for FilePool {
             Err(Error::ModifyEmptyBucketError())
         }
     }
-    fn check_scheme(&self, scheme: &str) -> Result<(), Error> {
-        unimplemented!()
+    fn check_scheme(&self, _scheme: &str) -> Result<(), Error> {
+        panic!("file pool use new to create a valid, without this function")
     }
 }

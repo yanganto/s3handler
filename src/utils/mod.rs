@@ -92,7 +92,7 @@ impl S3Convert for S3Object {
         match self.bucket.clone() {
             Some(b) => (
                 format!("{}.{}", b, host),
-                self.key.clone().unwrap_or("/".to_string()),
+                self.key.clone().unwrap_or_else(|| "/".to_string()),
             ),
             None => (host, "/".to_string()),
         }
@@ -102,7 +102,11 @@ impl S3Convert for S3Object {
         match self.bucket.clone() {
             Some(b) => (
                 host,
-                format!("/{}/{}", b, self.key.clone().unwrap_or("/".to_string())),
+                format!(
+                    "/{}/{}",
+                    b,
+                    self.key.clone().unwrap_or_else(|| "/".to_string())
+                ),
             ),
             None => (host, "/".to_string()),
         }
@@ -141,7 +145,7 @@ impl S3Convert for S3Object {
         let key = match object {
             None => None,
             Some(b) => {
-                if b.starts_with("/") {
+                if b.starts_with('/') {
                     Some(b)
                 } else {
                     Some(format!("/{}", b))
