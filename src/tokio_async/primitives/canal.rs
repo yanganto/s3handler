@@ -79,7 +79,11 @@ impl Canal {
             PoolType::DownPool => self.downstream_object.take(),
         }
         .unwrap_or_default();
-        o.key = Some(object_name.to_string());
+        o.key = if object_name.starts_with('/') {
+            Some(object_name.to_string())
+        } else {
+            Some(format!("/{}", object_name))
+        };
         match self.default {
             PoolType::UpPool => self.upstream_object = Some(o),
             PoolType::DownPool => self.downstream_object = Some(o),
@@ -123,7 +127,11 @@ impl Canal {
     #[inline]
     pub fn _toward_object(&mut self, object_name: &str) {
         let mut o = self.downstream_object.take().unwrap_or_default();
-        o.key = Some(object_name.to_string());
+        o.key = if object_name.starts_with('/') {
+            Some(object_name.to_string())
+        } else {
+            Some(format!("/{}", object_name))
+        };
         self.downstream_object = Some(o);
     }
 
@@ -160,7 +168,11 @@ impl Canal {
     #[inline]
     pub fn _from_object(&mut self, object_name: &str) {
         let mut o = self.upstream_object.take().unwrap_or_default();
-        o.key = Some(object_name.to_string());
+        o.key = if object_name.starts_with('/') {
+            Some(object_name.to_string())
+        } else {
+            Some(format!("/{}", object_name))
+        };
         self.upstream_object = Some(o);
     }
 

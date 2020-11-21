@@ -103,7 +103,7 @@ impl S3Convert for S3Object {
             Some(b) => (
                 host,
                 format!(
-                    "/{}/{}",
+                    "/{}{}",
                     b,
                     self.key.clone().unwrap_or_else(|| "/".to_string())
                 ),
