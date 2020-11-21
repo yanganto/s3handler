@@ -8,7 +8,7 @@ Here is the [document](https://docs.rs/s3handler/).
 
 
 ### Blocking API is ready
-use s3handler = { version="0.5.3", features = ["blocking"] }
+use s3handler = { features = ["blocking"] }
 
 ```rust
 let config = s3handler::CredentialConfig{
@@ -25,26 +25,24 @@ let _ = handler.la();
 ```
 
 ### :wrench: :wrench: :wrench: Async API is underdeveloping 
-It is willing to take sugguestion.
-use s3handler = { features = ["tokio"] }
-
+It is willing to take any sugguestions.
 Download a file with async api
+use s3handler = { features = ["tokio-async"] }
 ```
-let s3_pool = s3handler::tokio::primitives::S3Pool {
-    host: "somewhere.in.the.world".to_string(),
-    access_key: "akey".to_string(),
-    secret_key: "skey".to_string(),
-    ..Default::default()
-};
+// Public resource
+let s3_pool = s3handler::none_blocking::primitives::S3Pool::new("somewhere.in.the.world".to_string());
 let obj = s3_pool.bucket("bucket_name").object("objcet_name");
-// obj.to_file("/path/to/save/a/file").await;
+async {
+    obj.download_file("/path/to/save/a/file").await;
+};
+
 ```
 
 S3 async handler to manipulate objects and buckets.
 This treat all data as pool and create a canal to bridge two pool.
 It is easy to management and sync data from folder to S3, S3 to S3, event folder to folder.
 
->>>
+"""
        +------+
        | Pool | (UpPool)  modify by `from_*` api
        +------+
@@ -54,22 +52,19 @@ It is easy to management and sync data from folder to S3, S3 to S3, event folder
        +------+
        | Pool | (DownPool) modify by `toward_*` api
        +------+
->>>
+"""
 
-```rust
-use s3handler::tokio::traits::DataPool;
+```
+use s3handler::none_blocking::traits::DataPool;
 
-let s3_pool = s3handler::tokio::primitives::S3Pool {
-    host: "somewhere.in.the.world".to_string(),
-    access_key: "akey".to_string(),
-    secret_key: "skey".to_string(),
-    ..Default::default()
-};
+// Resource with AWS version 2 auth
+let s3_pool = s3handler::none_blocking::primitives::S3Pool::new("somewhere.in.the.world".to_string())
+        .aws_v2("access-key".to_string(), "secrete-key".to_string());
 let bucket = s3_pool.bucket("bucket_name");
 // Actually the bucket is a unconnnected canal
 assert!(!bucket.is_connect());
 let canal = bucket.toward("/path/to/another/folder").unwrap();
 // The canal bridges the two folder and ready to transfer data between bucket and folder
 assert!(canal.is_connect());
-canal.sync().await;
+canal.sync().awit;
 ```
