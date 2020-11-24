@@ -2,10 +2,15 @@ use async_trait::async_trait;
 use base64::encode;
 use bytes::Bytes;
 use chrono::prelude::*;
+use crypto::digest::Digest;
+use crypto::sha2::Sha256;
+use hmac::{Hmac, Mac};
 use reqwest::{
     header::{self, HeaderMap, HeaderValue},
     Client, Method, Request, Url,
 };
+use rustc_serialize::hex::ToHex;
+use sha2::Sha256 as sha2_256;
 use url::form_urlencoded;
 
 use super::canal::{Canal, PoolType};
@@ -13,9 +18,11 @@ use crate::error::Error;
 use crate::tokio_async::traits::DataPool;
 use crate::utils::{S3Convert, S3Object, UrlStyle};
 
+type UTCTime = DateTime<Utc>;
+
 pub trait Authorizer: Send + Sync {
     /// This method will setup the header and put the authorize string
-    fn authorize(&self, _request: &mut Request) {
+    fn authorize(&self, _request: &mut Request, _now: &UTCTime) {
         unimplemented!()
     }
 
@@ -26,7 +33,7 @@ pub trait Authorizer: Send + Sync {
 pub struct PublicAuthorizer {}
 
 impl Authorizer for PublicAuthorizer {
-    fn authorize(&self, _requests: &mut Request) {}
+    fn authorize(&self, _requests: &mut Request, _now: &UTCTime) {}
 }
 
 pub struct V2Authorizer {
@@ -43,7 +50,7 @@ impl V2Authorizer {
             access_key,
             secret_key,
             auth_str: "AWS".to_string(),
-            special_header_prefix: "X-AMZ".to_string(),
+            special_header_prefix: "x-amz".to_string(),
         }
     }
     /// Setup the Auth string, if you are using customized S3
@@ -54,7 +61,7 @@ impl V2Authorizer {
     }
 
     /// Setup the Special header prefix, if you are using customized S3
-    /// Default is "X-AMZ"
+    /// Default is "x-amz"
     pub fn special_header_prefix(mut self, special_header_prefix: String) -> Self {
         self.special_header_prefix = special_header_prefix;
         self
@@ -62,9 +69,13 @@ impl V2Authorizer {
 }
 
 impl Authorizer for V2Authorizer {
-    fn authorize(&self, request: &mut Request) {
-        let signature = request.sign(&self.secret_key);
-        let authorize_string = format!("{} {}:{}", self.auth_str, self.access_key, signature);
+    fn authorize(&self, request: &mut Request, now: &UTCTime) {
+        let authorize_string = format!(
+            "{} {}:{}",
+            self.auth_str,
+            self.access_key,
+            <Request as V2Signature>::sign(request, &self.secret_key)
+        );
         let headers = request.headers_mut();
         headers.insert(header::AUTHORIZATION, authorize_string.parse().unwrap());
     }
@@ -74,9 +85,10 @@ pub struct V4Authorizer {
     pub access_key: String,
     pub secret_key: String,
     pub region: String,
-    pub service: String,  // s3
-    pub action: String,   // aws4_request
-    pub auth_str: String, // AWS4-HMAC-SHA256
+    pub service: String,
+    pub action: String,
+    pub auth_str: String,
+    pub special_header_prefix: String,
 }
 
 impl V4Authorizer {
@@ -89,6 +101,7 @@ impl V4Authorizer {
             service: "s3".to_string(),
             action: "aws4_request".to_string(),
             auth_str: "AWS4-HMAC-SHA256".to_string(),
+            special_header_prefix: "x-amz".to_string(),
         }
     }
     /// Default is "us-east-1"
@@ -112,9 +125,43 @@ impl V4Authorizer {
         self.auth_str = auth_str;
         self
     }
+
+    /// Setup the Special header prefix, if you are using customized S3
+    /// Default is "x-amz"
+    pub fn special_header_prefix(mut self, special_header_prefix: String) -> Self {
+        self.special_header_prefix = special_header_prefix;
+        self
+    }
 }
 
 impl Authorizer for V4Authorizer {
+    fn authorize(&self, request: &mut Request, now: &UTCTime) {
+        let SignatureInfo {
+            signed_headers,
+            signature,
+        } = <Request as V4Signature>::sign(
+            request,
+            &self.auth_str,
+            now,
+            &self.secret_key,
+            &self.region,
+            &self.service,
+            &self.action,
+        );
+        let authorize_string = format!(
+            "{} Credential={}/{}/{}/{}/{}, SignedHeaders={}, Signature={}",
+            self.auth_str,
+            self.access_key,
+            now.format("%Y%m%d").to_string(),
+            self.region,
+            self.service,
+            self.action,
+            signed_headers,
+            signature
+        );
+        let headers = request.headers_mut();
+        headers.insert(header::AUTHORIZATION, authorize_string.parse().unwrap());
+    }
     fn update_region(&mut self, region: String) {
         self.region = region;
     }
@@ -167,10 +214,10 @@ impl S3Pool {
         }
     }
 
-    pub fn init_headers(&self, headers: &mut HeaderMap) {
+    pub fn init_headers(&self, headers: &mut HeaderMap, now: &UTCTime) {
         headers.insert(
             header::DATE,
-            HeaderValue::from_str(Utc::now().to_rfc2822().as_str()).unwrap(),
+            HeaderValue::from_str(now.to_rfc2822().as_str()).unwrap(),
         );
         headers.insert(header::HOST, HeaderValue::from_str(&self.host).unwrap());
     }
@@ -186,8 +233,9 @@ impl DataPool for S3Pool {
             // TODO reuse the client setting and not only the reqest
             let mut request = self.client.put(&self.endpoint(desc)).body(object).build()?;
 
-            self.init_headers(request.headers_mut());
-            self.authorizer.authorize(&mut request);
+            let now = Utc::now();
+            self.init_headers(request.headers_mut(), &now);
+            self.authorizer.authorize(&mut request, &now);
 
             let _r = self.client.execute(request).await?;
             // TODO validate status code
@@ -202,8 +250,9 @@ impl DataPool for S3Pool {
             // TODO reuse the client setting and not only the reqest
             let mut request = Request::new(Method::GET, Url::parse(&self.endpoint(desc))?);
 
-            self.init_headers(request.headers_mut());
-            self.authorizer.authorize(&mut request);
+            let now = Utc::now();
+            self.init_headers(request.headers_mut(), &now);
+            self.authorizer.authorize(&mut request, &now);
 
             let r = self.client.execute(request).await?;
 
@@ -220,8 +269,9 @@ impl DataPool for S3Pool {
     async fn remove(&self, desc: S3Object) -> Result<(), Error> {
         let mut request = Request::new(Method::DELETE, Url::parse(&self.endpoint(desc))?);
 
-        self.init_headers(request.headers_mut());
-        self.authorizer.authorize(&mut request);
+        let now = Utc::now();
+        self.init_headers(request.headers_mut(), &now);
+        self.authorizer.authorize(&mut request, &now);
 
         let _r = self.client.execute(request).await?;
         // TODO validate status code
@@ -247,11 +297,47 @@ impl S3Pool {
     }
 }
 
+pub struct CanonicalHeadersInfo {
+    pub signed_headers: String,
+    pub canonical_headers: String,
+}
+
+pub struct CanonicalRequestInfo {
+    pub signed_headers: String,
+    pub canonical_request: String,
+}
+
 pub trait Canonical {
+    fn canonical_headers_info(&self) -> CanonicalHeadersInfo;
     fn canonical_query_string(&self) -> String;
+    fn canonical_request_info(&self) -> CanonicalRequestInfo;
 }
 
 impl Canonical for Request {
+    fn canonical_headers_info(&self) -> CanonicalHeadersInfo {
+        let mut canonical_headers = String::new();
+        let mut signed_headers = Vec::new();
+
+        let mut headers: Vec<(String, &str)> = self
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default()))
+            .collect();
+
+        headers.sort_by(|a, b| a.0.to_lowercase().as_str().cmp(b.0.to_lowercase().as_str()));
+        for h in headers {
+            canonical_headers.push_str(h.0.to_lowercase().as_str());
+            canonical_headers.push(':');
+            canonical_headers.push_str(h.1.trim());
+            canonical_headers.push('\n');
+            signed_headers.push(h.0.to_lowercase());
+        }
+        CanonicalHeadersInfo {
+            signed_headers: signed_headers.join(";"),
+            canonical_headers,
+        }
+    }
+
     fn canonical_query_string(&self) -> String {
         let mut encoded = form_urlencoded::Serializer::new(String::new());
         let mut qs: Vec<(String, String)> = self
@@ -279,6 +365,25 @@ impl Canonical for Request {
         // https://docs.aws.amazon.com/general/latest/gr/signature-version-2.html#create-canonical-string
         encoded.finish().replace("%7E", "~")
     }
+
+    fn canonical_request_info(&self) -> CanonicalRequestInfo {
+        let CanonicalHeadersInfo {
+            signed_headers,
+            canonical_headers,
+        } = self.canonical_headers_info();
+        CanonicalRequestInfo {
+            signed_headers: signed_headers.clone(),
+            canonical_request: format!(
+                "{}\n{}\n{}\n{}\n{}\n{}",
+                self.method().as_str(),
+                self.url().path(),
+                self.canonical_query_string(),
+                canonical_headers,
+                signed_headers,
+                self.payload_sha256()
+            ),
+        }
+    }
 }
 
 pub trait V2Signature
@@ -302,7 +407,233 @@ impl V2Signature for Request {
     fn sign(&self, sign_key: &str) -> String {
         encode(&hmacsha1::hmac_sha1(
             sign_key.as_bytes(),
-            self.string_to_signed().as_bytes(),
+            <Request as V2Signature>::string_to_signed(self).as_bytes(),
         ))
+    }
+}
+
+pub struct RequestHashInfo {
+    pub signed_headers: String,
+    pub sha256: String,
+}
+
+pub struct StringToSignInfo {
+    pub signed_headers: String,
+    pub string_to_signed: String,
+}
+
+pub struct SignatureInfo {
+    pub signed_headers: String,
+    pub signature: String,
+}
+
+pub trait V4Signature
+where
+    Self: Canonical,
+{
+    fn string_to_signed(
+        &self,
+        auth_str: &str,
+        now: &UTCTime,
+        region: &str,
+        service: &str,
+        action: &str,
+    ) -> StringToSignInfo;
+    fn payload_sha256(&self) -> String;
+    fn request_sha256(&self) -> RequestHashInfo;
+    fn sign(
+        &self,
+        auth_str: &str,
+        now: &UTCTime,
+        sign_key: &str,
+        region: &str,
+        service: &str,
+        action: &str,
+    ) -> SignatureInfo;
+}
+
+impl V4Signature for Request {
+    fn string_to_signed(
+        &self,
+        auth_str: &str,
+        now: &UTCTime,
+        region: &str,
+        service: &str,
+        action: &str,
+    ) -> StringToSignInfo {
+        let iso_8601_str = {
+            let mut s = now.to_rfc3339();
+            s.retain(|c| !['-', ':'].contains(&c));
+            format!("{}Z", &s[..15])
+        };
+        let RequestHashInfo {
+            signed_headers,
+            sha256,
+        } = self.request_sha256();
+        StringToSignInfo {
+            signed_headers,
+            string_to_signed: format!(
+                "{}\n{}\n{}/{}/{}/{}\n{}",
+                auth_str,
+                iso_8601_str,
+                &iso_8601_str[..8],
+                region,
+                service,
+                action,
+                sha256
+            ),
+        }
+    }
+
+    fn payload_sha256(&self) -> String {
+        let mut sha = Sha256::new();
+        sha.input(
+            self.body()
+                .map(|b| b.as_bytes())
+                .unwrap_or_default()
+                .unwrap_or_default(),
+        );
+        sha.result_str()
+    }
+
+    fn request_sha256(&self) -> RequestHashInfo {
+        let CanonicalRequestInfo {
+            signed_headers,
+            canonical_request,
+        } = self.canonical_request_info();
+        let mut sha = Sha256::new();
+        sha.input_str(canonical_request.as_str());
+        RequestHashInfo {
+            signed_headers,
+            sha256: sha.result_str(),
+        }
+    }
+
+    fn sign(
+        &self,
+        auth_str: &str,
+        now: &UTCTime,
+        sign_key: &str,
+        region: &str,
+        service: &str,
+        action: &str,
+    ) -> SignatureInfo {
+        let StringToSignInfo {
+            signed_headers,
+            string_to_signed,
+        } = <Request as V4Signature>::string_to_signed(
+            self, auth_str, now, region, service, action,
+        );
+        let time_str = {
+            let mut s = now.to_rfc3339();
+            s.retain(|c| !['-', ':'].contains(&c));
+            &s[..8].to_string()
+        };
+
+        let mut key: String = auth_str.split("-").next().unwrap_or_default().to_string();
+        key.push_str(sign_key);
+
+        let mut mac = Hmac::<sha2_256>::new(key.as_str().as_bytes());
+        mac.input(time_str.as_bytes());
+        let result = mac.result();
+        let code_bytes = result.code();
+
+        let mut mac1 = Hmac::<sha2_256>::new(code_bytes);
+        mac1.input(region.as_bytes());
+        let result1 = mac1.result();
+        let code_bytes1 = result1.code();
+
+        let mut mac2 = Hmac::<sha2_256>::new(code_bytes1);
+        mac2.input(service.as_bytes());
+        let result2 = mac2.result();
+        let code_bytes2 = result2.code();
+
+        let mut mac3 = Hmac::<sha2_256>::new(code_bytes2);
+        mac3.input(action.as_bytes());
+        let result3 = mac3.result();
+        let code_bytes3 = result3.code();
+
+        let mut mac4 = Hmac::<sha2_256>::new(code_bytes3);
+        mac4.input(string_to_signed.as_bytes());
+        let result4 = mac4.result();
+        let code_bytes4 = result4.code();
+
+        SignatureInfo {
+            signed_headers,
+            signature: code_bytes4.to_hex(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_v4_payload_hash() {
+        let request = Request::new(
+            Method::GET,
+            Url::parse("http://somewhere.in.the.world").unwrap(),
+        );
+        assert_eq!(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            request.payload_sha256()
+        );
+    }
+    #[test]
+    fn test_v4_string_to_signed() {
+        let mut request = Request::new(
+            Method::GET,
+            Url::parse_with_params(
+                "http://iam.amazonaws.com",
+                &[("Version", "2010-05-08"), ("Action", "ListUsers")],
+            )
+            .unwrap(),
+        );
+
+        let headers = request.headers_mut();
+        headers.insert(
+            header::HeaderName::from_static("x-amz-date"),
+            HeaderValue::from_str("20150830T123600Z").unwrap(),
+        );
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_str("iam.amazonaws.com").unwrap(),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str("application/x-www-form-urlencoded; charset=utf-8").unwrap(),
+        );
+
+        let dt = Utc.ymd(2015, 8, 30).and_hms_nano(12, 36, 00, 000);
+
+        assert_eq!(
+            "AWS4-HMAC-SHA256\n\
+             20150830T123600Z\n\
+             20150830/us-east-1/iam/aws4_request\n\
+             f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59",
+            <Request as V4Signature>::string_to_signed(
+                &request,
+                "AWS4-HMAC-SHA256",
+                &dt,
+                "us-east-1",
+                "iam",
+                "aws4_request"
+            )
+            .string_to_signed
+        );
+        assert_eq!(
+            "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7",
+            <Request as V4Signature>::sign(
+                &request,
+                "AWS4-HMAC-SHA256",
+                &dt,
+                "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+                "us-east-1",
+                "iam",
+                "aws4_request"
+            )
+            .signature
+            .as_str()
+        );
     }
 }
