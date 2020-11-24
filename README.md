@@ -24,7 +24,7 @@ let mut handler = s3handler::Handler::from(&config);
 let _ = handler.la();
 ```
 
-### :wrench: :wrench: :wrench: Async API is underdeveloping 
+### :wrench: :wrench: :wrench: Async API is underdeveloping
 It is willing to take any sugguestions.
 Download a file with async api
 use s3handler = { features = ["tokio-async"] }
@@ -42,7 +42,7 @@ S3 async handler to manipulate objects and buckets.
 This treat all data as pool and create a canal to bridge two pool.
 It is easy to management and sync data from folder to S3, S3 to S3, event folder to folder.
 
-"""
+>>>
        +------+
        | Pool | (UpPool)  modify by `from_*` api
        +------+
@@ -52,7 +52,7 @@ It is easy to management and sync data from folder to S3, S3 to S3, event folder
        +------+
        | Pool | (DownPool) modify by `toward_*` api
        +------+
-"""
+>>>
 
 ```
 use s3handler::none_blocking::traits::DataPool;
