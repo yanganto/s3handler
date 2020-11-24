@@ -2,12 +2,22 @@ use std::{env, path::Path};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::fs::{create_dir, read, remove_dir_all, remove_file, write};
+use tokio::fs::{create_dir, read, read_dir, remove_dir_all, remove_file, write, ReadDir};
 use url::Url;
 
 use crate::error::Error;
-use crate::tokio_async::traits::DataPool;
+use crate::tokio_async::traits::{DataPool, S3Folder};
 use crate::utils::S3Object;
+
+#[async_trait]
+impl S3Folder for ReadDir {
+    async fn next_object(&mut self) -> Result<Option<S3Object>, Error> {
+        Ok(self.next_entry().await?.map(|e| S3Object {
+            key: e.path().to_str().map(|s| s.to_string()),
+            ..Default::default()
+        }))
+    }
+}
 
 #[derive(Clone)]
 pub struct FilePool {
@@ -44,6 +54,7 @@ impl FilePool {
         Ok(fp)
     }
 }
+
 unsafe impl Send for FilePool {}
 unsafe impl Sync for FilePool {}
 
@@ -61,6 +72,7 @@ impl DataPool for FilePool {
             Err(Error::ModifyEmptyBucketError())
         }
     }
+
     async fn pull(&self, desc: S3Object) -> Result<Bytes, Error> {
         if let S3Object {
             bucket: Some(b),
@@ -76,16 +88,33 @@ impl DataPool for FilePool {
         }
         Err(Error::PullEmptyObjectError())
     }
-    async fn list(
-        &self,
-        index: Option<S3Object>,
-    ) -> Result<(Vec<S3Object>, Option<S3Object>), Error> {
-        unimplemented!()
+
+    async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error> {
+        match index {
+            Some(S3Object {
+                bucket: Some(b),
+                key: None,
+                ..
+            }) => Ok(Box::new(
+                read_dir(Path::new(&format!("{}{}", self.drive, b))).await?,
+            )),
+            Some(S3Object {
+                bucket: Some(b),
+                key: Some(k),
+                ..
+            }) => Ok(Box::new(
+                read_dir(Path::new(&format!("{}{}{}", self.drive, b, k))).await?,
+            )),
+            Some(S3Object { bucket: None, .. }) | None => Ok(Box::new(
+                read_dir(Path::new(&format!("{}", self.drive))).await?,
+            )),
+        }
     }
+
     async fn remove(&self, desc: S3Object) -> Result<(), Error> {
         if let Some(b) = desc.bucket {
             let r = if let Some(k) = desc.key {
-                remove_file(Path::new(&format!("{}{}", b, k))).await
+                remove_file(Path::new(&format!("{}{}{}", self.drive, b, k))).await
             } else {
                 remove_dir_all(Path::new(&b)).await
             };
@@ -94,6 +123,7 @@ impl DataPool for FilePool {
             Err(Error::ModifyEmptyBucketError())
         }
     }
+
     fn check_scheme(&self, _scheme: &str) -> Result<(), Error> {
         panic!("file pool use new to create a valid, without this function")
     }

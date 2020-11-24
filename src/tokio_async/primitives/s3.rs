@@ -15,7 +15,7 @@ use url::form_urlencoded;
 
 use super::canal::{Canal, PoolType};
 use crate::error::Error;
-use crate::tokio_async::traits::DataPool;
+use crate::tokio_async::traits::{DataPool, S3Folder};
 use crate::utils::{S3Convert, S3Object, UrlStyle};
 
 type UTCTime = DateTime<Utc>;
@@ -266,10 +266,7 @@ impl DataPool for S3Pool {
             Ok(r.bytes().await?)
         }
     }
-    async fn list(
-        &self,
-        index: Option<S3Object>,
-    ) -> Result<(Vec<S3Object>, Option<S3Object>), Error> {
+    async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error> {
         unimplemented!()
     }
     async fn remove(&self, desc: S3Object) -> Result<(), Error> {
