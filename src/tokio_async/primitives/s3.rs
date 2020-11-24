@@ -93,11 +93,11 @@ pub struct V4Authorizer {
 
 impl V4Authorizer {
     /// new V4 Authorizer for AWS and CEPH
-    pub fn new(access_key: String, secret_key: String) -> Self {
+    pub fn new(access_key: String, secret_key: String, region: String) -> Self {
         V4Authorizer {
             access_key,
             secret_key,
-            region: "us-east-1".to_string(),
+            region,
             service: "s3".to_string(),
             action: "aws4_request".to_string(),
             auth_str: "AWS4-HMAC-SHA256".to_string(),
@@ -197,8 +197,14 @@ impl S3Pool {
             part_size: None,
         }
     }
+
     pub fn aws_v2(mut self, access_key: String, secret_key: String) -> Self {
         self.authorizer = Box::new(V2Authorizer::new(access_key, secret_key));
+        self
+    }
+
+    pub fn aws_v4(mut self, access_key: String, secret_key: String, region: String) -> Self {
+        self.authorizer = Box::new(V4Authorizer::new(access_key, secret_key, region));
         self
     }
 
@@ -310,7 +316,7 @@ pub struct CanonicalRequestInfo {
 pub trait Canonical {
     fn canonical_headers_info(&self) -> CanonicalHeadersInfo;
     fn canonical_query_string(&self) -> String;
-    fn canonical_request_info(&self) -> CanonicalRequestInfo;
+    fn canonical_request_info(&self, payload_hash: &str) -> CanonicalRequestInfo;
 }
 
 impl Canonical for Request {
@@ -366,7 +372,7 @@ impl Canonical for Request {
         encoded.finish().replace("%7E", "~")
     }
 
-    fn canonical_request_info(&self) -> CanonicalRequestInfo {
+    fn canonical_request_info(&self, payload_hash: &str) -> CanonicalRequestInfo {
         let CanonicalHeadersInfo {
             signed_headers,
             canonical_headers,
@@ -380,7 +386,7 @@ impl Canonical for Request {
                 self.canonical_query_string(),
                 canonical_headers,
                 signed_headers,
-                self.payload_sha256()
+                payload_hash
             ),
         }
     }
@@ -432,17 +438,19 @@ where
     Self: Canonical,
 {
     fn string_to_signed(
-        &self,
+        &mut self,
         auth_str: &str,
         now: &UTCTime,
         region: &str,
         service: &str,
         action: &str,
     ) -> StringToSignInfo;
-    fn payload_sha256(&self) -> String;
-    fn request_sha256(&self) -> RequestHashInfo;
+    /// calculate hash mac and update header
+    fn payload_sha256(&mut self) -> String;
+    /// calculate hash mac and update header
+    fn request_sha256(&mut self) -> RequestHashInfo;
     fn sign(
-        &self,
+        &mut self,
         auth_str: &str,
         now: &UTCTime,
         sign_key: &str,
@@ -454,7 +462,7 @@ where
 
 impl V4Signature for Request {
     fn string_to_signed(
-        &self,
+        &mut self,
         auth_str: &str,
         now: &UTCTime,
         region: &str,
@@ -466,6 +474,11 @@ impl V4Signature for Request {
             s.retain(|c| !['-', ':'].contains(&c));
             format!("{}Z", &s[..15])
         };
+        let headers = self.headers_mut();
+        headers.insert(
+            header::HeaderName::from_static("x-amz-date"),
+            HeaderValue::from_str(&iso_8601_str).unwrap(),
+        );
         let RequestHashInfo {
             signed_headers,
             sha256,
@@ -485,7 +498,7 @@ impl V4Signature for Request {
         }
     }
 
-    fn payload_sha256(&self) -> String {
+    fn payload_sha256(&mut self) -> String {
         let mut sha = Sha256::new();
         sha.input(
             self.body()
@@ -493,14 +506,23 @@ impl V4Signature for Request {
                 .unwrap_or_default()
                 .unwrap_or_default(),
         );
-        sha.result_str()
+        let paload_hash = sha.result_str();
+        let headers = self.headers_mut();
+        headers.insert(
+            header::HeaderName::from_static("x-amz-content-sha256"),
+            HeaderValue::from_str(&paload_hash).unwrap(),
+        );
+        paload_hash
     }
 
-    fn request_sha256(&self) -> RequestHashInfo {
+    fn request_sha256(&mut self) -> RequestHashInfo {
+        let paload_hash = self.payload_sha256();
+
         let CanonicalRequestInfo {
             signed_headers,
             canonical_request,
-        } = self.canonical_request_info();
+        } = self.canonical_request_info(&paload_hash);
+
         let mut sha = Sha256::new();
         sha.input_str(canonical_request.as_str());
         RequestHashInfo {
@@ -510,7 +532,7 @@ impl V4Signature for Request {
     }
 
     fn sign(
-        &self,
+        &mut self,
         auth_str: &str,
         now: &UTCTime,
         sign_key: &str,
@@ -562,78 +584,5 @@ impl V4Signature for Request {
             signed_headers,
             signature: code_bytes4.to_hex(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_v4_payload_hash() {
-        let request = Request::new(
-            Method::GET,
-            Url::parse("http://somewhere.in.the.world").unwrap(),
-        );
-        assert_eq!(
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            request.payload_sha256()
-        );
-    }
-    #[test]
-    fn test_v4_string_to_signed() {
-        let mut request = Request::new(
-            Method::GET,
-            Url::parse_with_params(
-                "http://iam.amazonaws.com",
-                &[("Version", "2010-05-08"), ("Action", "ListUsers")],
-            )
-            .unwrap(),
-        );
-
-        let headers = request.headers_mut();
-        headers.insert(
-            header::HeaderName::from_static("x-amz-date"),
-            HeaderValue::from_str("20150830T123600Z").unwrap(),
-        );
-        headers.insert(
-            header::HOST,
-            HeaderValue::from_str("iam.amazonaws.com").unwrap(),
-        );
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_str("application/x-www-form-urlencoded; charset=utf-8").unwrap(),
-        );
-
-        let dt = Utc.ymd(2015, 8, 30).and_hms_nano(12, 36, 00, 000);
-
-        assert_eq!(
-            "AWS4-HMAC-SHA256\n\
-             20150830T123600Z\n\
-             20150830/us-east-1/iam/aws4_request\n\
-             f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59",
-            <Request as V4Signature>::string_to_signed(
-                &request,
-                "AWS4-HMAC-SHA256",
-                &dt,
-                "us-east-1",
-                "iam",
-                "aws4_request"
-            )
-            .string_to_signed
-        );
-        assert_eq!(
-            "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7",
-            <Request as V4Signature>::sign(
-                &request,
-                "AWS4-HMAC-SHA256",
-                &dt,
-                "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
-                "us-east-1",
-                "iam",
-                "aws4_request"
-            )
-            .signature
-            .as_str()
-        );
     }
 }
