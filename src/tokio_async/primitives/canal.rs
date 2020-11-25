@@ -2,7 +2,7 @@ use std::fmt;
 
 use super::file::FilePool;
 use crate::error::Error;
-use crate::tokio_async::traits::DataPool;
+use crate::tokio_async::traits::{DataPool, S3Folder};
 use crate::utils::S3Object;
 
 #[derive(Debug)]
@@ -250,7 +250,7 @@ impl Canal {
         if let Some(upstream_object) = self.upstream_object {
             Ok(self
                 .up_pool
-                .expect("default pool exists")
+                .expect("upstream pool should exist") // TODO customize Error
                 .remove(upstream_object)
                 .await?)
         } else {
@@ -264,7 +264,7 @@ impl Canal {
         if let Some(downstream_object) = self.downstream_object {
             Ok(self
                 .down_pool
-                .expect("default pool exists")
+                .expect("downstream pool should exist") // TODO customize Error
                 .remove(downstream_object)
                 .await?)
         } else {
@@ -280,10 +280,30 @@ impl Canal {
             PoolType::DownPool => self.downstream_remove().await,
         }
     }
-    // pub async fn upstream_list(self)
-    // pub async fn downstream_list(self)
-    // pub async fn list(self)
-    //
+
+    pub async fn upstream_list(self) -> Result<Box<dyn S3Folder>, Error> {
+        Ok(self
+            .up_pool
+            .expect("upstream pool should exist")
+            .list(self.upstream_object)
+            .await?)
+    }
+
+    pub async fn downstream_list(self) -> Result<Box<dyn S3Folder>, Error> {
+        Ok(self
+            .down_pool
+            .expect("downstream pool should exist")
+            .list(self.downstream_object)
+            .await?)
+    }
+
+    pub async fn list(self) -> Result<Box<dyn S3Folder>, Error> {
+        match self.default {
+            PoolType::UpPool => self.upstream_list().await,
+            PoolType::DownPool => self.downstream_list().await,
+        }
+    }
+
     // pub async fn sync(self)
     // End of IO api
 }

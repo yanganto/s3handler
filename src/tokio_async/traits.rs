@@ -7,20 +7,23 @@ use crate::error::Error;
 use crate::utils::S3Object;
 
 #[async_trait]
+pub trait S3Folder {
+    async fn next_object(&mut self) -> Result<Option<S3Object>, Error>;
+}
+
+#[async_trait]
 pub trait DataPool: Send + Sync {
     async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error>;
     async fn pull(&self, desc: S3Object) -> Result<Bytes, Error>;
-    async fn list(
-        &self,
-        index: Option<S3Object>,
-    ) -> Result<(Vec<S3Object>, Option<S3Object>), Error>;
+    /// The index will be treated as a folder object to filter the list results
+    async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error>;
     async fn remove(&self, desc: S3Object) -> Result<(), Error>;
     /// TODO: sync feature
     /// This method is for the sync feature
-    fn fetch_meta(&self, desc: &mut S3Object) {
+    fn fetch_meta(&self, _desc: &mut S3Object) {
         unimplemented!()
     }
-    fn check_scheme(&self, scheme: &str) -> Result<(), Error> {
+    fn check_scheme(&self, _scheme: &str) -> Result<(), Error> {
         Err(Error::SchemeError())
     }
     fn as_base_from(self, resource_location: &str) -> Result<Canal, Error>

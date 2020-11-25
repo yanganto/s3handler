@@ -1,5 +1,8 @@
+use quick_xml::{events::Event, Reader};
 use regex::Regex;
 use url::Url;
+
+use crate::error::Error;
 
 /// # Flexible S3 format parser
 /// - bucket - the objeck belonge to which
@@ -164,6 +167,7 @@ impl S3Convert for S3Object {
 }
 
 /// The request URL style
+#[derive(Clone)]
 pub enum UrlStyle {
     /// Path style URL
     /// The bucket name will be listed in the URI
@@ -177,4 +181,72 @@ impl Default for UrlStyle {
     fn default() -> Self {
         UrlStyle::PATH
     }
+}
+
+pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
+    let mut reader = Reader::from_str(body);
+    let mut output = Vec::new();
+    let mut in_name_tag = false;
+    let mut in_key_tag = false;
+    let mut in_mtime_tag = false;
+    let mut in_etag_tag = false;
+    let mut in_storage_class_tag = false;
+    let mut bucket = String::new();
+    let mut key = String::new();
+    let mut mtime = String::new();
+    let mut etag = String::new();
+    let mut storage_class = String::new();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event(&mut buf) {
+            Ok(Event::Start(ref e)) => match e.name() {
+                b"Name" => in_name_tag = true,
+                b"Key" => in_key_tag = true,
+                b"LastModified" => in_mtime_tag = true,
+                b"ETag" => in_etag_tag = true,
+                b"StorageClass" => in_storage_class_tag = true,
+                _ => {}
+            },
+            Ok(Event::End(ref e)) => match e.name() {
+                b"Name" => {
+                    output.push(S3Convert::new(Some(bucket.clone()), None, None, None, None))
+                }
+                b"Contents" => output.push(S3Convert::new(
+                    Some(bucket.clone()),
+                    Some(key.clone()),
+                    Some(mtime.clone()),
+                    Some(etag[1..etag.len() - 1].to_string()),
+                    Some(storage_class.clone()),
+                )),
+                _ => {}
+            },
+            Ok(Event::Text(e)) => {
+                if in_key_tag {
+                    key = e.unescape_and_decode(&reader).unwrap();
+                    in_key_tag = false;
+                }
+                if in_mtime_tag {
+                    mtime = e.unescape_and_decode(&reader).unwrap();
+                    in_mtime_tag = false;
+                }
+                if in_etag_tag {
+                    etag = e.unescape_and_decode(&reader).unwrap();
+                    in_etag_tag = false;
+                }
+                if in_storage_class_tag {
+                    storage_class = e.unescape_and_decode(&reader).unwrap();
+                    in_storage_class_tag = false;
+                }
+                if in_name_tag {
+                    bucket = e.unescape_and_decode(&reader).unwrap();
+                    in_name_tag = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(Error::XMLParseError(e)),
+            _ => (),
+        }
+        buf.clear();
+    }
+    Ok(output)
 }
