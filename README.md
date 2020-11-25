@@ -30,7 +30,7 @@ use s3handler = { features = ["tokio"] }
 
 Download a file with async api
 use s3handler = { features = ["tokio-async"] }
-```
+```rust
 // Public resource
 let s3_pool = s3handler::none_blocking::primitives::S3Pool::new("somewhere.in.the.world".to_string());
 let obj = s3_pool.bucket("bucket_name").object("objcet_name");
@@ -56,7 +56,7 @@ It is easy to management and sync data from folder to S3, S3 to S3, event folder
        +------+
 >>>
 
-```
+```rust
 use s3handler::none_blocking::traits::DataPool;
 
 // Resource with AWS version 2 auth
