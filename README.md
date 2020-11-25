@@ -24,8 +24,8 @@ let mut handler = s3handler::Handler::from(&config);
 let _ = handler.la();
 ```
 
-### :wrench: :wrench: :wrench: Async API is underdeveloping 
-It is willing to take sugguestion.
+### Async API
+Basic CRUD is implemented, other advance features are under developing.
 use s3handler = { features = ["tokio"] }
 
 Download a file with async api
@@ -37,7 +37,7 @@ let s3_pool = s3handler::tokio::primitives::S3Pool {
     ..Default::default()
 };
 let obj = s3_pool.bucket("bucket_name").object("objcet_name");
-// obj.to_file("/path/to/save/a/file").await;
+obj.download_file("/path/to/save/a/file").await;
 ```
 
 S3 async handler to manipulate objects and buckets.
@@ -72,4 +72,16 @@ let canal = bucket.toward("/path/to/another/folder").unwrap();
 // The canal bridges the two folder and ready to transfer data between bucket and folder
 assert!(canal.is_connect());
 canal.sync().await;
+
+let s3_pool = S3Pool::new(env::var("S3_HOST").unwrap()).aws_v4(
+    akey.to_string(),
+    env::var("SECRET_KEY").unwrap(),
+    env::var("REGION").unwrap(),
+);
+let mut object_list = s3_pool
+    .bucket(&env::var("BUCKET_NAME").unwrap())
+    .list()
+    .await
+    .unwrap();
+let obj = object_list.next_object().await.unwrap();
 ```

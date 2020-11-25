@@ -20,10 +20,10 @@ pub trait DataPool: Send + Sync {
     async fn remove(&self, desc: S3Object) -> Result<(), Error>;
     /// TODO: sync feature
     /// This method is for the sync feature
-    fn fetch_meta(&self, desc: &mut S3Object) {
+    fn fetch_meta(&self, _desc: &mut S3Object) {
         unimplemented!()
     }
-    fn check_scheme(&self, scheme: &str) -> Result<(), Error> {
+    fn check_scheme(&self, _scheme: &str) -> Result<(), Error> {
         Err(Error::SchemeError())
     }
     fn as_base_from(self, resource_location: &str) -> Result<Canal, Error>

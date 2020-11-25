@@ -75,7 +75,7 @@ impl V2Authorizer {
 }
 
 impl Authorizer for V2Authorizer {
-    fn authorize(&self, request: &mut Request, now: &UTCTime) {
+    fn authorize(&self, request: &mut Request, _now: &UTCTime) {
         let authorize_string = format!(
             "{} {}:{}",
             self.auth_str,
@@ -263,7 +263,7 @@ impl S3Pool {
 #[async_trait]
 impl DataPool for S3Pool {
     async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error> {
-        if let Some(part_size) = self.part_size {
+        if let Some(_part_size) = self.part_size {
             // TODO mulitipart
             unimplemented!()
         } else {
@@ -281,7 +281,7 @@ impl DataPool for S3Pool {
     }
 
     async fn pull(&self, desc: S3Object) -> Result<Bytes, Error> {
-        if let Some(part_size) = self.part_size {
+        if let Some(_part_size) = self.part_size {
             // TODO mulitipart
             unimplemented!()
         } else {
