@@ -25,12 +25,11 @@ pub use crate::utils::UrlStyle;
 use aws::{AWS2Client, AWS4Client};
 use upload_pool::{MultiUploadParameters, UploadRequestPool, BYTE_PERPART};
 
-use crate::utils::{S3Convert, S3Object};
+use crate::utils::{s3object_list_xml_parser, S3Convert, S3Object};
 use failure;
 use log::{debug, error, info};
 use mime_guess::from_path;
-use quick_xml::events::Event;
-use quick_xml::Reader;
+use quick_xml::{events::Event, Reader};
 use regex::Regex;
 use reqwest::{blocking::Response, StatusCode};
 use serde_derive::Deserialize;
@@ -275,74 +274,6 @@ impl Handler<'_> {
         }
     }
 
-    fn object_list_xml_parser(&self, body: &str) -> Result<Vec<S3Object>, Error> {
-        let mut reader = Reader::from_str(body);
-        let mut output = Vec::new();
-        let mut in_name_tag = false;
-        let mut in_key_tag = false;
-        let mut in_mtime_tag = false;
-        let mut in_etag_tag = false;
-        let mut in_storage_class_tag = false;
-        let mut bucket = String::new();
-        let mut key = String::new();
-        let mut mtime = String::new();
-        let mut etag = String::new();
-        let mut storage_class = String::new();
-        let mut buf = Vec::new();
-        loop {
-            match reader.read_event(&mut buf) {
-                Ok(Event::Start(ref e)) => match e.name() {
-                    b"Name" => in_name_tag = true,
-                    b"Key" => in_key_tag = true,
-                    b"LastModified" => in_mtime_tag = true,
-                    b"ETag" => in_etag_tag = true,
-                    b"StorageClass" => in_storage_class_tag = true,
-                    _ => {}
-                },
-                Ok(Event::End(ref e)) => match e.name() {
-                    b"Name" => {
-                        output.push(S3Convert::new(Some(bucket.clone()), None, None, None, None))
-                    }
-                    b"Contents" => output.push(S3Convert::new(
-                        Some(bucket.clone()),
-                        Some(key.clone()),
-                        Some(mtime.clone()),
-                        Some(etag[1..etag.len() - 1].to_string()),
-                        Some(storage_class.clone()),
-                    )),
-                    _ => {}
-                },
-                Ok(Event::Text(e)) => {
-                    if in_key_tag {
-                        key = e.unescape_and_decode(&reader).unwrap();
-                        in_key_tag = false;
-                    }
-                    if in_mtime_tag {
-                        mtime = e.unescape_and_decode(&reader).unwrap();
-                        in_mtime_tag = false;
-                    }
-                    if in_etag_tag {
-                        etag = e.unescape_and_decode(&reader).unwrap();
-                        in_etag_tag = false;
-                    }
-                    if in_storage_class_tag {
-                        storage_class = e.unescape_and_decode(&reader).unwrap();
-                        in_storage_class_tag = false;
-                    }
-                    if in_name_tag {
-                        bucket = e.unescape_and_decode(&reader).unwrap();
-                        in_name_tag = false;
-                    }
-                }
-                Ok(Event::Eof) => break,
-                Err(e) => return Err(Error::XMLParseError(e)),
-                _ => (),
-            }
-            buf.clear();
-        }
-        Ok(output)
-    }
-
     /// List all objects in a bucket
     pub fn la(&mut self) -> Result<Vec<S3Object>, failure::Error> {
         let mut output = Vec::new();
@@ -366,7 +297,7 @@ impl Handler<'_> {
             }
             Format::XML => {
                 buckets.extend(
-                    self.object_list_xml_parser(std::str::from_utf8(res).unwrap_or(""))?
+                    s3object_list_xml_parser(std::str::from_utf8(res).unwrap_or(""))?
                         .iter()
                         .map(|o| o.bucket.clone().unwrap()),
                 );
@@ -412,9 +343,9 @@ impl Handler<'_> {
                     Format::XML => {
                         next_marker =
                             self.next_marker_xml_parser(std::str::from_utf8(body).unwrap_or(""));
-                        output.extend(
-                            self.object_list_xml_parser(std::str::from_utf8(body).unwrap_or(""))?,
-                        );
+                        output.extend(s3object_list_xml_parser(
+                            std::str::from_utf8(body).unwrap_or(""),
+                        )?);
                     }
                 }
             }
@@ -471,7 +402,7 @@ impl Handler<'_> {
                         }
                         Format::XML => {
                             next_marker = self.next_marker_xml_parser(&res);
-                            output.extend(self.object_list_xml_parser(&res)?);
+                            output.extend(s3object_list_xml_parser(&res)?);
                         }
                     }
                 }
@@ -498,9 +429,9 @@ impl Handler<'_> {
                         });
                     }
                     Format::XML => {
-                        output.extend(
-                            self.object_list_xml_parser(std::str::from_utf8(body).unwrap_or(""))?,
-                        );
+                        output.extend(s3object_list_xml_parser(
+                            std::str::from_utf8(body).unwrap_or(""),
+                        )?);
                     }
                 }
             }
