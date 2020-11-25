@@ -4,10 +4,11 @@ use bytes::Bytes;
 use chrono::prelude::*;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
+use dyn_clone::DynClone;
 use hmac::{Hmac, Mac};
 use reqwest::{
     header::{self, HeaderMap, HeaderValue},
-    Client, Method, Request, Response, Url,
+    Client, Method, Request, Url,
 };
 use rustc_serialize::hex::ToHex;
 use sha2::Sha256 as sha2_256;
@@ -16,57 +17,11 @@ use url::form_urlencoded;
 use super::canal::{Canal, PoolType};
 use crate::error::Error;
 use crate::tokio_async::traits::{DataPool, S3Folder};
-use crate::utils::{S3Convert, S3Object, UrlStyle};
+use crate::utils::{s3object_list_xml_parser, S3Convert, S3Object, UrlStyle};
 
 type UTCTime = DateTime<Utc>;
 
-pub struct S3ListResult {
-    url: Url,
-    objects: Vec<S3Object>,
-    start_after: Option<String>,
-    client: Client,
-}
-
-impl S3ListResult {
-    async fn new(client: &Client, url: Url) -> Result<Self, Error> {
-        let r = client
-            .execute(Request::new(Method::GET, url.clone()))
-            .await?;
-        let mut s3_list = Self {
-            url,
-            objects: Vec::new(),
-            start_after: None,
-            client: client.clone(),
-        };
-        s3_list.handle_response(r).await?;
-        Ok(s3_list)
-    }
-
-    async fn handle_response(&mut self, r: Response) -> Result<(), Error> {
-        // update objects & start_after
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl S3Folder for S3ListResult {
-    async fn next_object(&mut self) -> Result<Option<S3Object>, Error> {
-        if self.objects.is_empty() && self.start_after.is_some() {
-            let mut url = self.url.clone();
-            url.query_pairs_mut()
-                .append_pair("start-after", &self.start_after.take().unwrap());
-            let r = self.client.execute(Request::new(Method::GET, url)).await?;
-            self.handle_response(r).await?;
-        }
-        if self.objects.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(self.objects.remove(0)))
-        }
-    }
-}
-
-pub trait Authorizer: Send + Sync {
+pub trait Authorizer: Send + Sync + DynClone {
     /// This method will setup the header and put the authorize string
     fn authorize(&self, _request: &mut Request, _now: &UTCTime) {
         unimplemented!()
@@ -76,12 +31,16 @@ pub trait Authorizer: Send + Sync {
     fn update_region(&mut self, _region: String) {}
 }
 
+dyn_clone::clone_trait_object!(Authorizer);
+
+#[derive(Clone)]
 pub struct PublicAuthorizer {}
 
 impl Authorizer for PublicAuthorizer {
     fn authorize(&self, _requests: &mut Request, _now: &UTCTime) {}
 }
 
+#[derive(Clone)]
 pub struct V2Authorizer {
     pub access_key: String,
     pub secret_key: String,
@@ -89,6 +48,7 @@ pub struct V2Authorizer {
     pub special_header_prefix: String,
 }
 
+#[allow(dead_code)]
 impl V2Authorizer {
     /// new V2 Authorizer compatible with AWS and CEPH
     pub fn new(access_key: String, secret_key: String) -> Self {
@@ -127,6 +87,7 @@ impl Authorizer for V2Authorizer {
     }
 }
 
+#[derive(Clone)]
 pub struct V4Authorizer {
     pub access_key: String,
     pub secret_key: String,
@@ -137,6 +98,7 @@ pub struct V4Authorizer {
     pub special_header_prefix: String,
 }
 
+#[allow(dead_code)]
 impl V4Authorizer {
     /// new V4 Authorizer for AWS and CEPH
     pub fn new(access_key: String, secret_key: String, region: String) -> Self {
@@ -213,6 +175,7 @@ impl Authorizer for V4Authorizer {
     }
 }
 
+#[derive(Clone)]
 pub struct S3Pool {
     pub host: String,
     /// To use https or not, please note that integrity is secured by S3 protocol.
@@ -230,9 +193,22 @@ pub struct S3Pool {
     client: Client,
 
     pub authorizer: Box<dyn Authorizer>,
+
+    objects: Vec<S3Object>,
+    start_after: Option<String>,
 }
 
 impl S3Pool {
+    pub fn bucket(self, bucket_name: &str) -> Canal {
+        Canal {
+            up_pool: Some(Box::new(self)),
+            down_pool: None,
+            upstream_object: Some(bucket_name.to_string().into()),
+            downstream_object: None,
+            default: PoolType::UpPool,
+        }
+    }
+
     pub fn new(host: String) -> Self {
         S3Pool {
             host,
@@ -241,6 +217,8 @@ impl S3Pool {
             client: Client::new(),
             authorizer: Box::new(PublicAuthorizer {}),
             part_size: None,
+            objects: Vec::with_capacity(1000),
+            start_after: None,
         }
     }
 
@@ -272,6 +250,13 @@ impl S3Pool {
             HeaderValue::from_str(now.to_rfc2822().as_str()).unwrap(),
         );
         headers.insert(header::HOST, HeaderValue::from_str(&self.host).unwrap());
+    }
+
+    fn handle_list_response(&mut self, body: String) -> Result<(), Error> {
+        self.objects = s3object_list_xml_parser(&body)?;
+        // TODO
+        // parse start_after
+        Ok(())
     }
 }
 
@@ -315,28 +300,18 @@ impl DataPool for S3Pool {
     }
 
     async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error> {
-        match index {
-            Some(S3Object {
-                bucket: Some(b),
-                key: None,
-                ..
-            }) => {
-                let url = Url::parse(&format!("{}", b))?;
-                Ok(Box::new(S3ListResult::new(&self.client, url).await?))
-            }
-            Some(S3Object {
-                bucket: Some(b),
-                key: Some(k),
-                ..
-            }) => {
-                let url = Url::parse(&format!("{}{}", b, k))?;
-                Ok(Box::new(S3ListResult::new(&self.client, url).await?))
-            }
-            Some(S3Object { bucket: None, .. }) | None => {
-                let url = Url::parse("/")?;
-                Ok(Box::new(S3ListResult::new(&self.client, url).await?))
-            }
-        }
+        let mut pool = self.clone();
+        let mut request = Request::new(
+            Method::GET,
+            Url::parse(&self.endpoint(index.unwrap_or_default()))?,
+        );
+
+        let now = Utc::now();
+        pool.init_headers(request.headers_mut(), &now);
+        pool.authorizer.authorize(&mut request, &now);
+        let body = pool.client.execute(request).await?.text().await?;
+        pool.handle_list_response(body)?;
+        Ok(Box::new(pool))
     }
 
     async fn remove(&self, desc: S3Object) -> Result<(), Error> {
@@ -359,14 +334,21 @@ impl DataPool for S3Pool {
         }
     }
 }
-impl S3Pool {
-    pub fn bucket(self, bucket_name: &str) -> Canal {
-        Canal {
-            up_pool: Some(Box::new(self)),
-            down_pool: None,
-            upstream_object: Some(bucket_name.to_string().into()),
-            downstream_object: None,
-            default: PoolType::UpPool,
+
+#[async_trait]
+impl S3Folder for S3Pool {
+    async fn next_object(&mut self) -> Result<Option<S3Object>, Error> {
+        // if self.objects.is_empty() && self.start_after.is_some() {
+        //     // let mut url = self.client.url.clone();
+        //     // url.query_pairs_mut()
+        //     //     .append_pair("start-after", &self.start_after.take().unwrap());
+        //     // let r = self.client.execute(Request::new(Method::GET, url)).await?;
+        //     // self.handle_response(r).await?;
+        // }
+        if self.objects.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(self.objects.remove(0)))
         }
     }
 }
@@ -652,5 +634,18 @@ impl V4Signature for Request {
             signed_headers,
             signature: code_bytes4.to_hex(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_handle_list_response() {
+        let s = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>ant-lab</Name><Prefix></Prefix><Marker></Marker><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated><Contents><Key>14M</Key><LastModified>2020-01-31T14:58:45.000Z</LastModified><ETag>&quot;8ff43d748637d249d80d6f45e15c7663-3&quot;</ETag><Size>14336000</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>7M</Key><LastModified>2020-11-21T09:50:46.000Z</LastModified><ETag>&quot;cbe4f29b8b099989ae49afc02aa1c618-2&quot;</ETag><Size>7168000</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>7M.json</Key><LastModified>2020-09-19T14:59:23.000Z</LastModified><ETag>&quot;d34bd3f9aff10629ac49353312a42b0f-2&quot;</ETag><Size>7168000</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>get</Key><LastModified>2020-08-11T06:10:11.000Z</LastModified><ETag>&quot;f895d74af5106ce0c3d6cb008fb3b98d&quot;</ETag><Size>304</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>t</Key><LastModified>2020-09-19T15:10:08.000Z</LastModified><ETag>&quot;5050ef3558233dc04b3fac50eff68de1&quot;</ETag><Size>10</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>t.txt</Key><LastModified>2020-09-19T15:04:46.000Z</LastModified><ETag>&quot;5050ef3558233dc04b3fac50eff68de1&quot;</ETag><Size>10</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>test-orig</Key><LastModified>2020-11-21T09:48:29.000Z</LastModified><ETag>&quot;c059dadd468de1835bc99dab6e3b2cee-3&quot;</ETag><Size>11534336</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>test-s3handle</Key><LastModified>2020-11-21T10:09:39.000Z</LastModified><ETag>&quot;5dd39cab1c53c2c77cd352983f9641e1&quot;</ETag><Size>20</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>test.json</Key><LastModified>2020-08-11T09:54:42.000Z</LastModified><ETag>&quot;f895d74af5106ce0c3d6cb008fb3b98d&quot;</ETag><Size>304</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>";
+        let mut pool = S3Pool::new("somewhere.in.the.world".to_string());
+        pool.handle_list_response(s.to_string()).unwrap();
+        assert!(pool.next_object().await.unwrap().is_some());
     }
 }

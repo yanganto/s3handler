@@ -21,6 +21,16 @@ async fn test_v2_async_operation() {
                     .as_secs()
             );
 
+            // List
+            let s3_pool = S3Pool::new(env::var("S3_HOST").unwrap())
+                .aws_v2(akey.to_string(), env::var("SECRET_KEY").unwrap());
+            let mut object_list = s3_pool
+                .bucket(&env::var("BUCKET_NAME").unwrap())
+                .list()
+                .await
+                .unwrap();
+            assert!(object_list.next_object().await.unwrap().is_some());
+
             // Download
             let s3_pool = S3Pool::new(env::var("S3_HOST").unwrap())
                 .aws_v2(akey.to_string(), env::var("SECRET_KEY").unwrap());
