@@ -7,7 +7,7 @@ use crypto::sha2::Sha256;
 use hmac::{Hmac, Mac};
 use reqwest::{
     header::{self, HeaderMap, HeaderValue},
-    Client, Method, Request, Url,
+    Client, Method, Request, Response, Url,
 };
 use rustc_serialize::hex::ToHex;
 use sha2::Sha256 as sha2_256;
@@ -19,6 +19,52 @@ use crate::tokio_async::traits::{DataPool, S3Folder};
 use crate::utils::{S3Convert, S3Object, UrlStyle};
 
 type UTCTime = DateTime<Utc>;
+
+pub struct S3ListResult {
+    url: Url,
+    objects: Vec<S3Object>,
+    start_after: Option<String>,
+    client: Client,
+}
+
+impl S3ListResult {
+    async fn new(client: &Client, url: Url) -> Result<Self, Error> {
+        let r = client
+            .execute(Request::new(Method::GET, url.clone()))
+            .await?;
+        let mut s3_list = Self {
+            url,
+            objects: Vec::new(),
+            start_after: None,
+            client: client.clone(),
+        };
+        s3_list.handle_response(r).await?;
+        Ok(s3_list)
+    }
+
+    async fn handle_response(&mut self, r: Response) -> Result<(), Error> {
+        // update objects & start_after
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl S3Folder for S3ListResult {
+    async fn next_object(&mut self) -> Result<Option<S3Object>, Error> {
+        if self.objects.is_empty() && self.start_after.is_some() {
+            let mut url = self.url.clone();
+            url.query_pairs_mut()
+                .append_pair("start-after", &self.start_after.take().unwrap());
+            let r = self.client.execute(Request::new(Method::GET, url)).await?;
+            self.handle_response(r).await?;
+        }
+        if self.objects.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(self.objects.remove(0)))
+        }
+    }
+}
 
 pub trait Authorizer: Send + Sync {
     /// This method will setup the header and put the authorize string
@@ -248,6 +294,7 @@ impl DataPool for S3Pool {
         }
         Ok(())
     }
+
     async fn pull(&self, desc: S3Object) -> Result<Bytes, Error> {
         if let Some(part_size) = self.part_size {
             // TODO mulitipart
@@ -266,9 +313,32 @@ impl DataPool for S3Pool {
             Ok(r.bytes().await?)
         }
     }
+
     async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error> {
-        unimplemented!()
+        match index {
+            Some(S3Object {
+                bucket: Some(b),
+                key: None,
+                ..
+            }) => {
+                let url = Url::parse(&format!("{}", b))?;
+                Ok(Box::new(S3ListResult::new(&self.client, url).await?))
+            }
+            Some(S3Object {
+                bucket: Some(b),
+                key: Some(k),
+                ..
+            }) => {
+                let url = Url::parse(&format!("{}{}", b, k))?;
+                Ok(Box::new(S3ListResult::new(&self.client, url).await?))
+            }
+            Some(S3Object { bucket: None, .. }) | None => {
+                let url = Url::parse("/")?;
+                Ok(Box::new(S3ListResult::new(&self.client, url).await?))
+            }
+        }
     }
+
     async fn remove(&self, desc: S3Object) -> Result<(), Error> {
         let mut request = Request::new(Method::DELETE, Url::parse(&self.endpoint(desc))?);
 
@@ -280,6 +350,7 @@ impl DataPool for S3Pool {
         // TODO validate status code
         Ok(())
     }
+
     fn check_scheme(&self, scheme: &str) -> Result<(), Error> {
         if scheme.to_lowercase() != "s3" {
             Err(Error::SchemeError())
