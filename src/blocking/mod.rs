@@ -35,7 +35,7 @@ use reqwest::{blocking::Response, StatusCode};
 use serde_derive::Deserialize;
 use serde_json;
 
-mod aws;
+pub mod aws;
 mod upload_pool;
 
 static RESPONSE_CONTENT_FORMAT: &'static str =
