@@ -188,7 +188,7 @@ pub struct S3Pool {
     /// The part size for multipart, default disabled.
     /// If Some the pull/push will check out the object size first and do mulitpart
     /// If None download and upload will be in one part
-    pub part_size: Option<usize>,
+    pub part_size: Option<u64>,
 
     client: Client,
 
@@ -257,6 +257,11 @@ impl S3Pool {
         // TODO
         // parse start_after
         Ok(())
+    }
+
+    pub fn part_size(mut self, s: u64) -> Self {
+        self.part_size = Some(s);
+        self
     }
 }
 
