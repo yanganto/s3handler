@@ -25,7 +25,7 @@ pub use crate::utils::UrlStyle;
 use aws::{AWS2Client, AWS4Client};
 use upload_pool::{MultiUploadParameters, UploadRequestPool, BYTE_PERPART};
 
-use crate::utils::{s3object_list_xml_parser, S3Convert, S3Object};
+use crate::utils::{s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object};
 use failure;
 use log::{debug, error, info};
 use mime_guess::from_path;
@@ -461,43 +461,14 @@ impl Handler<'_> {
         )
         .unwrap_or("")
         .to_string();
-        let mut upload_id = "".to_string();
-        match self.format {
+        let upload_id = match self.format {
             Format::JSON => {
                 let re = Regex::new(r#""UploadId":"(?P<upload_id>[^"]+)""#).unwrap();
                 let caps = re.captures(&res).expect("Upload ID missing");
-                upload_id = caps["upload_id"].to_string();
+                caps["upload_id"].to_string()
             }
-            Format::XML => {
-                let mut reader = Reader::from_str(&res);
-                let mut in_tag = false;
-                let mut buf = Vec::new();
-
-                loop {
-                    match reader.read_event(&mut buf) {
-                        Ok(Event::Start(ref e)) => {
-                            if e.name() == b"UploadId" {
-                                in_tag = true;
-                            }
-                        }
-                        Ok(Event::End(ref e)) => {
-                            if e.name() == b"UploadId" {
-                                in_tag = false;
-                            }
-                        }
-                        Ok(Event::Text(e)) => {
-                            if in_tag {
-                                upload_id = e.unescape_and_decode(&reader).unwrap();
-                            }
-                        }
-                        Ok(Event::Eof) => break,
-                        Err(e) => return Err(Error::XMLParseError(e).into()),
-                        _ => (),
-                    }
-                    buf.clear();
-                }
-            }
-        }
+            Format::XML => upload_id_xml_parser(&res)?,
+        };
 
         info!("upload id: {}", upload_id);
 

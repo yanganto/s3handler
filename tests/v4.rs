@@ -9,7 +9,7 @@
 //! export BUCKET_NAME=xxxxxxx
 //! export OBJECT_NAME=test-s3handle
 //! export BIG_OBJECT_NAME=test-s3handle-big
-//! export PART_SIZE=3670016
+//! export PART_SIZE=5555555
 //! export EXPECT_CONTENT="This is a test file"$'\n'
 //! ```
 
@@ -101,16 +101,15 @@ async fn test_v4_async_operation() {
 
             // TODO
             // Test multipart download
-            let s3_pool = S3Pool::new(env::var("S3_HOST").unwrap())
-                .aws_v4(
-                    akey.to_string(),
-                    env::var("SECRET_KEY").unwrap(),
-                    env::var("REGION").unwrap(),
-                )
-                .part_size(env::var("PART_SIZE").unwrap().parse::<u64>().unwrap());
+            let s3_pool = S3Pool::new(env::var("S3_HOST").unwrap()).aws_v4(
+                akey.to_string(),
+                env::var("SECRET_KEY").unwrap(),
+                env::var("REGION").unwrap(),
+            );
+            // .part_size(env::var("PART_SIZE").unwrap().parse::<usize>().unwrap());
             let obj = s3_pool
                 .bucket(&env::var("BUCKET_NAME").unwrap())
-                .object(&env::var("OBJECT_NAME").unwrap());
+                .object(&env::var("BIG_OBJECT_NAME").unwrap());
             obj.download_file(temp_test_file).await.unwrap();
 
             // Test multipart upload
@@ -120,7 +119,7 @@ async fn test_v4_async_operation() {
                     env::var("SECRET_KEY").unwrap(),
                     env::var("REGION").unwrap(),
                 )
-                .part_size(env::var("PART_SIZE").unwrap().parse::<u64>().unwrap())
+                .part_size(env::var("PART_SIZE").unwrap().parse::<usize>().unwrap())
                 .bucket(&env::var("BUCKET_NAME").unwrap())
                 .object(&new_object);
             obj.upload_file(temp_test_file).await.unwrap();

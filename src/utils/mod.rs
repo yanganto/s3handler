@@ -250,3 +250,49 @@ pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
     }
     Ok(output)
 }
+
+pub fn upload_id_xml_parser(res: &str) -> Result<String, Error> {
+    let mut reader = Reader::from_str(res);
+    let mut in_tag = false;
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                if e.name() == b"UploadId" {
+                    in_tag = true;
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                if e.name() == b"UploadId" {
+                    in_tag = false;
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if in_tag {
+                    return Ok(e.unescape_and_decode(&reader).unwrap());
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                return Err(Error::XMLParseError(e).into());
+            }
+            _ => (),
+        }
+        buf.clear();
+    }
+    return Err(Error::FieldNotFound("upload_id"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_upload_id() {
+        let response = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>ant-lab</Bucket><Key>test-s3handle-big-v4-async-1611237128</Key><UploadId>6lxsB3W3e.Gf6D2mXrDpscWxHeVNloGTDMPUmomjmRYbQ5j4K31mMTcSdzWTHY6cSnA_S36J6GKY.aAxAkjcTXGb3btEB_O9XSpIy9mFRIlYAo0DH_Oyg9KF6D5fppQzPfYBy_OZTIncT6zK_zQIyQ--</UploadId></InitiateMultipartUploadResult>";
+        let upload_id = upload_id_xml_parser(response);
+        assert!(upload_id.is_ok());
+        assert_eq!(upload_id.unwrap(), "6lxsB3W3e.Gf6D2mXrDpscWxHeVNloGTDMPUmomjmRYbQ5j4K31mMTcSdzWTHY6cSnA_S36J6GKY.aAxAkjcTXGb3btEB_O9XSpIy9mFRIlYAo0DH_Oyg9KF6D5fppQzPfYBy_OZTIncT6zK_zQIyQ--");
+    }
+}
