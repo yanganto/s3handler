@@ -5,10 +5,11 @@ use chrono::prelude::*;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 use dyn_clone::DynClone;
+use futures::future::join_all;
 use hmac::{Hmac, Mac};
 use reqwest::{
     header::{self, HeaderMap, HeaderValue},
-    Client, Method, Request, Url,
+    Client, Method, Request, Response, Url,
 };
 use rustc_serialize::hex::ToHex;
 use sha2::Sha256 as sha2_256;
@@ -17,7 +18,7 @@ use url::form_urlencoded;
 use super::canal::{Canal, PoolType};
 use crate::error::Error;
 use crate::tokio_async::traits::{DataPool, S3Folder};
-use crate::utils::{s3object_list_xml_parser, S3Convert, S3Object, UrlStyle};
+use crate::utils::{s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object, UrlStyle};
 
 type UTCTime = DateTime<Utc>;
 
@@ -258,25 +259,116 @@ impl S3Pool {
         // parse start_after
         Ok(())
     }
+
+    pub fn part_size(mut self, s: usize) -> Self {
+        self.part_size = Some(s);
+        self
+    }
+
+    /// Init multipart upload session, and return `multipart_id`
+    async fn init_multipart(&self, url: String) -> Result<String, Error> {
+        let url = format!("{}?uploads", url);
+        let mut request = self.client.post(&url).build()?;
+
+        let now = Utc::now();
+        self.init_headers(request.headers_mut(), &now);
+        self.authorizer.authorize(&mut request, &now);
+
+        let r = self.client.execute(request).await?;
+
+        Ok(upload_id_xml_parser(&r.text().await?)?)
+    }
+
+    async fn generate_part_request(
+        &self,
+        desc: S3Object,
+        multipart_id: &str,
+        part_size: usize,
+        object: Bytes,
+    ) -> Result<Vec<Result<Response, reqwest::Error>>, Error> {
+        let mut part_number = 0;
+        let mut size = 0;
+        let mut req_list = vec![];
+        while size < object.len() {
+            part_number += 1;
+            let end = if size + part_size >= object.len() {
+                object.len()
+            } else {
+                size + part_size
+            };
+            let url = format!(
+                "{}?uploadId={}&partNumber={}",
+                self.endpoint(desc.clone()),
+                multipart_id,
+                part_number
+            );
+
+            let mut request = self
+                .client
+                .put(&url)
+                .body(object.slice(size..end))
+                .build()?;
+
+            let now = Utc::now();
+            self.init_headers(request.headers_mut(), &now);
+            self.authorizer.authorize(&mut request, &now);
+            req_list.push(self.client.execute(request));
+            size += part_size
+        }
+        Ok(join_all(req_list).await)
+    }
+    async fn complete_part_request(
+        &self,
+        reqs: Vec<Result<Response, reqwest::Error>>,
+        desc: S3Object,
+        multipart_id: &str,
+    ) -> Result<Response, Error> {
+        let mut content = format!("<CompleteMultipartUpload>");
+        for (idx, res) in reqs.into_iter().enumerate() {
+            let r = res?;
+            let etag = r.headers()[reqwest::header::ETAG]
+                .to_str()
+                .expect("unexpected etag from server");
+
+            content.push_str(&format!(
+                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+                idx + 1,
+                etag
+            ));
+        }
+        content.push_str(&format!("</CompleteMultipartUpload>"));
+        let url = format!("{}?uploadId={}", self.endpoint(desc), multipart_id);
+        let mut request = self.client.post(&url).body(content.into_bytes()).build()?;
+        let now = Utc::now();
+        self.init_headers(request.headers_mut(), &now);
+        self.authorizer.authorize(&mut request, &now);
+        let r = self.client.execute(request).await?;
+        Ok(r)
+    }
 }
 
 #[async_trait]
 impl DataPool for S3Pool {
     async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error> {
-        if let Some(_part_size) = self.part_size {
-            // TODO mulitipart
-            unimplemented!()
+        let part_size = self.part_size.unwrap_or_default();
+        let _r = if part_size > 0 && part_size < object.len() {
+            let multipart_id = self.init_multipart(self.endpoint(desc.clone())).await?;
+
+            let reqs = self
+                .generate_part_request(desc.clone(), &multipart_id, part_size, object)
+                .await?;
+            self.complete_part_request(reqs, desc, &multipart_id)
+                .await?
         } else {
-            // TODO reuse the client setting and not only the reqest
             let mut request = self.client.put(&self.endpoint(desc)).body(object).build()?;
 
             let now = Utc::now();
             self.init_headers(request.headers_mut(), &now);
             self.authorizer.authorize(&mut request, &now);
 
-            let _r = self.client.execute(request).await?;
-            // TODO validate status code
-        }
+            self.client.execute(request).await?
+        };
+        // TODO validate _r status code
         Ok(())
     }
 
@@ -293,7 +385,6 @@ impl DataPool for S3Pool {
             self.authorizer.authorize(&mut request, &now);
 
             let r = self.client.execute(request).await?;
-
             // TODO validate status code
             Ok(r.bytes().await?)
         }

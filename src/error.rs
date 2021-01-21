@@ -9,6 +9,8 @@ pub enum Error {
     // JSONParseError(serde_json::Error),
     #[fail(display = "The response should be XML: {}", 0)]
     XMLParseError(quick_xml::Error),
+    #[fail(display = "The field {} not found in response", 0)]
+    FieldNotFound(&'static str),
     #[fail(display = "Unexpected input from user: {}", 0)]
     UserError(&'static str),
     #[fail(display = "Can not make a request: {}", 0)]
