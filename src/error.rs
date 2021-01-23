@@ -27,6 +27,8 @@ pub enum Error {
     ResourceUrlError(String),
     #[fail(display = "Pools should be initialized before pull or push on canal")]
     PoolUninitializeError(),
+    #[fail(display = "Header parsing error")]
+    HeaderParsingError(),
 }
 
 impl From<std::io::Error> for Error {
@@ -50,5 +52,11 @@ impl From<url::ParseError> for Error {
 impl From<reqwest::Error> for Error {
     fn from(err: reqwest::Error) -> Self {
         Error::ReqwestError(err.to_string())
+    }
+}
+
+impl From<reqwest::header::ToStrError> for Error {
+    fn from(err: reqwest::header::ToStrError) -> Self {
+        Error::HeaderParsingError()
     }
 }
