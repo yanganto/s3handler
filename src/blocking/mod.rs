@@ -336,6 +336,7 @@ impl Handler<'_> {
                                         Some(cap[2].to_string()),
                                         Some(cap[3].to_string()),
                                         Some(cap[5].to_string()),
+                                        None, // TODO: test with cech
                                     )
                                 }),
                         );
@@ -358,7 +359,7 @@ impl Handler<'_> {
         let mut output = Vec::new();
         let mut res: String;
         let s3_object = S3Object::from(prefix.unwrap_or("s3://").to_string());
-        let s3_bucket = S3Object::new(s3_object.bucket, None, None, None, None);
+        let s3_bucket = S3Object::new(s3_object.bucket, None, None, None, None, None);
         match s3_bucket.bucket.clone() {
             Some(b) => {
                 let re = Regex::new(RESPONSE_CONTENT_FORMAT).unwrap();
@@ -397,6 +398,7 @@ impl Handler<'_> {
                                     Some(cap[2].to_string()),
                                     Some(cap[3].to_string()),
                                     Some(cap[5].to_string()),
+                                    None, // TODO: test with ceph server
                                 )
                             }));
                         }
@@ -420,6 +422,7 @@ impl Handler<'_> {
                             output.extend(bucket_list.iter().map(|b| {
                                 S3Convert::new(
                                     Some(b["Name"].as_str().unwrap().to_string()),
+                                    None,
                                     None,
                                     None,
                                     None,

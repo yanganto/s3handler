@@ -8,7 +8,7 @@ use dyn_clone::DynClone;
 use futures::future::join_all;
 use hmac::{Hmac, Mac};
 use reqwest::{
-    header::{self, HeaderMap, HeaderValue},
+    header::{self, HeaderMap, HeaderName, HeaderValue},
     Client, Method, Request, Response, Url,
 };
 use rustc_serialize::hex::ToHex;
@@ -372,7 +372,8 @@ impl DataPool for S3Pool {
         Ok(())
     }
 
-    async fn pull(&self, desc: S3Object) -> Result<Bytes, Error> {
+    async fn pull(&self, mut desc: S3Object) -> Result<Bytes, Error> {
+        self.fetch_meta(&mut desc).await?;
         if let Some(_part_size) = self.part_size {
             // TODO mulitipart
             unimplemented!()
@@ -423,6 +424,38 @@ impl DataPool for S3Pool {
         } else {
             Ok(())
         }
+    }
+
+    async fn fetch_meta(&self, desc: &mut S3Object) -> Result<(), Error> {
+        let mut request = self.client.head(&self.endpoint(desc.clone())).build()?;
+
+        let now = Utc::now();
+        self.init_headers(request.headers_mut(), &now);
+        self.authorizer.authorize(&mut request, &now);
+
+        let r = self.client.execute(request).await?;
+        let headers = r.headers();
+        desc.etag = Some(
+            headers[reqwest::header::ETAG]
+                .to_str()?
+                .to_string()
+                .replace('"', ""),
+        );
+        desc.mtime = Some(
+            headers[HeaderName::from_lowercase(b"last-modified").unwrap()]
+                .to_str()?
+                .into(),
+        );
+        desc.size = Some(
+            headers[reqwest::header::CONTENT_TYPE]
+                .to_str()?
+                .parse::<usize>()
+                .unwrap_or_default(),
+        );
+
+        // TODO: check out it is correct or not that the storage class is absent here
+
+        Ok(())
     }
 }
 

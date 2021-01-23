@@ -10,6 +10,7 @@ use crate::error::Error;
 /// - mtime - the last modified time
 /// - etag - the etag calculated by server (MD5 in general)
 /// - storage_class - the storage class of this object
+/// - size - the size of the object
 /// ```
 /// use s3handler::{S3Object, S3Convert};
 ///
@@ -31,9 +32,10 @@ use crate::error::Error;
 pub struct S3Object {
     pub bucket: Option<String>,
     pub key: Option<String>,
-    pub mtime: Option<String>,
+    pub mtime: Option<String>, // TODO: use some datetime type
     pub etag: Option<String>,
     pub storage_class: Option<String>,
+    pub size: Option<usize>,
 }
 
 impl From<String> for S3Object {
@@ -50,6 +52,7 @@ impl From<String> for S3Object {
                     mtime: None,
                     etag: None,
                     storage_class: None,
+                    size: None,
                 },
                 _ => S3Object {
                     bucket,
@@ -57,6 +60,7 @@ impl From<String> for S3Object {
                     mtime: None,
                     etag: None,
                     storage_class: None,
+                    size: None,
                 },
             }
         } else {
@@ -87,6 +91,7 @@ pub trait S3Convert {
         mtime: Option<String>,
         etag: Option<String>,
         storage_class: Option<String>,
+        size: Option<usize>,
     ) -> Self;
 }
 
@@ -126,6 +131,7 @@ impl S3Convert for S3Object {
                 mtime: None,
                 etag: None,
                 storage_class: None,
+                size: None,
             }
         } else {
             S3Object {
@@ -134,6 +140,7 @@ impl S3Convert for S3Object {
                 mtime: None,
                 etag: None,
                 storage_class: None,
+                size: None,
             }
         }
     }
@@ -144,6 +151,7 @@ impl S3Convert for S3Object {
         mtime: Option<String>,
         etag: Option<String>,
         storage_class: Option<String>,
+        size: Option<usize>,
     ) -> S3Object {
         let key = match object {
             None => None,
@@ -162,6 +170,7 @@ impl S3Convert for S3Object {
             mtime,
             etag,
             storage_class,
+            size,
         }
     }
 }
@@ -191,11 +200,13 @@ pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
     let mut in_mtime_tag = false;
     let mut in_etag_tag = false;
     let mut in_storage_class_tag = false;
+    let mut in_size_tag = false;
     let mut bucket = String::new();
     let mut key = String::new();
     let mut mtime = String::new();
     let mut etag = String::new();
     let mut storage_class = String::new();
+    let mut size = 0;
     let mut buf = Vec::new();
     loop {
         match reader.read_event(&mut buf) {
@@ -205,18 +216,25 @@ pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
                 b"LastModified" => in_mtime_tag = true,
                 b"ETag" => in_etag_tag = true,
                 b"StorageClass" => in_storage_class_tag = true,
+                b"Size" => in_size_tag = true,
                 _ => {}
             },
             Ok(Event::End(ref e)) => match e.name() {
-                b"Name" => {
-                    output.push(S3Convert::new(Some(bucket.clone()), None, None, None, None))
-                }
+                b"Name" => output.push(S3Convert::new(
+                    Some(bucket.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )),
                 b"Contents" => output.push(S3Convert::new(
                     Some(bucket.clone()),
                     Some(key.clone()),
                     Some(mtime.clone()),
                     Some(etag[1..etag.len() - 1].to_string()),
                     Some(storage_class.clone()),
+                    Some(size.clone()),
                 )),
                 _ => {}
             },
@@ -240,6 +258,14 @@ pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
                 if in_name_tag {
                     bucket = e.unescape_and_decode(&reader).unwrap();
                     in_name_tag = false;
+                }
+                if in_size_tag {
+                    size = e
+                        .unescape_and_decode(&reader)
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap_or_default();
+                    in_size_tag = false;
                 }
             }
             Ok(Event::Eof) => break,
