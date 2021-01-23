@@ -56,7 +56,7 @@ impl From<reqwest::Error> for Error {
 }
 
 impl From<reqwest::header::ToStrError> for Error {
-    fn from(err: reqwest::header::ToStrError) -> Self {
+    fn from(_err: reqwest::header::ToStrError) -> Self {
         Error::HeaderParsingError()
     }
 }
