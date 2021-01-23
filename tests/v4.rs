@@ -101,12 +101,13 @@ async fn test_v4_async_operation() {
 
             // TODO
             // Test multipart download
-            let s3_pool = S3Pool::new(env::var("S3_HOST").unwrap()).aws_v4(
-                akey.to_string(),
-                env::var("SECRET_KEY").unwrap(),
-                env::var("REGION").unwrap(),
-            );
-            // .part_size(env::var("PART_SIZE").unwrap().parse::<usize>().unwrap());
+            let s3_pool = S3Pool::new(env::var("S3_HOST").unwrap())
+                .aws_v4(
+                    akey.to_string(),
+                    env::var("SECRET_KEY").unwrap(),
+                    env::var("REGION").unwrap(),
+                )
+                .part_size(env::var("PART_SIZE").unwrap().parse::<usize>().unwrap());
             let obj = s3_pool
                 .bucket(&env::var("BUCKET_NAME").unwrap())
                 .object(&env::var("BIG_OBJECT_NAME").unwrap());

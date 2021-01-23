@@ -20,7 +20,7 @@ pub trait DataPool: Send + Sync {
     async fn remove(&self, desc: S3Object) -> Result<(), Error>;
     /// TODO: sync feature
     /// This method is for the sync feature
-    fn fetch_meta(&self, _desc: &mut S3Object) {
+    async fn fetch_meta(&self, _desc: &mut S3Object) -> Result<(), Error> {
         unimplemented!()
     }
     fn check_scheme(&self, _scheme: &str) -> Result<(), Error> {
