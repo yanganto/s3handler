@@ -8,7 +8,7 @@ Here is the [document](https://docs.rs/s3handler/).
 
 
 ### Blocking API is ready
-use s3handler = { version="0.5.3", features = ["blocking"] }
+use s3handler = { version="0.6", features = ["blocking"] }
 
 ```rust
 let config = s3handler::CredentialConfig{
