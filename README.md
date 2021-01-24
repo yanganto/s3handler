@@ -8,7 +8,8 @@ Here is the [document](https://docs.rs/s3handler/).
 
 
 ### Blocking API is ready
-use s3handler = { version="0.6", features = ["blocking"] }
+
+use s3handler = { features = ["blocking"] }
 
 ```rust
 let config = s3handler::CredentialConfig{
@@ -29,15 +30,15 @@ Basic CRUD is implemented, other advance features are under developing.
 use s3handler = { features = ["tokio"] }
 
 Download a file with async api
-```
-let s3_pool = s3handler::tokio::primitives::S3Pool {
-    host: "somewhere.in.the.world".to_string(),
-    access_key: "akey".to_string(),
-    secret_key: "skey".to_string(),
-    ..Default::default()
-};
+use s3handler = { features = ["tokio-async"] }
+```rust
+// Public resource
+let s3_pool = s3handler::none_blocking::primitives::S3Pool::new("somewhere.in.the.world".to_string());
 let obj = s3_pool.bucket("bucket_name").object("objcet_name");
-obj.download_file("/path/to/save/a/file").await;
+async {
+    obj.download_file("/path/to/save/a/file").await;
+};
+
 ```
 
 S3 async handler to manipulate objects and buckets.
@@ -57,14 +58,11 @@ It is easy to management and sync data from folder to S3, S3 to S3, event folder
 >>>
 
 ```rust
-use s3handler::tokio::traits::DataPool;
+use s3handler::none_blocking::traits::DataPool;
 
-let s3_pool = s3handler::tokio::primitives::S3Pool {
-    host: "somewhere.in.the.world".to_string(),
-    access_key: "akey".to_string(),
-    secret_key: "skey".to_string(),
-    ..Default::default()
-};
+// Resource with AWS version 2 auth
+let s3_pool = s3handler::none_blocking::primitives::S3Pool::new("somewhere.in.the.world".to_string())
+        .aws_v2("access-key".to_string(), "secrete-key".to_string());
 let bucket = s3_pool.bucket("bucket_name");
 // Actually the bucket is a unconnnected canal
 assert!(!bucket.is_connect());
