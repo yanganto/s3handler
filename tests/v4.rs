@@ -1,3 +1,18 @@
+//! End to End test
+//!
+//! Following envvironment is need for testing
+//! ```bash
+//! export ACCESS_KEY=XXXXXXXXXXXXXXXXXXXX
+//! export SECRET_KEY=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+//! export REGION=ap-northeast-1
+//! export S3_HOST=s3.ap-northeast-1.amazonaws.com
+//! export BUCKET_NAME=xxxxxxx
+//! export OBJECT_NAME=test-s3handle
+//! export BIG_OBJECT_NAME=test-s3handle-big
+//! export PART_SIZE=5555555
+//! export EXPECT_CONTENT="This is a test file"$'\n'
+//! ```
+
 #[tokio::test]
 async fn test_v4_async_operation() {
     use s3handler::none_blocking::primitives::S3Pool;
@@ -13,7 +28,7 @@ async fn test_v4_async_operation() {
             // TODO: use tmpfile crate to test on different OS
             let temp_test_file = "/tmp/v4-async-test";
             let new_object = format!(
-                "{}-v4_async-{}",
+                "{}-v4-async-{}",
                 env::var("OBJECT_NAME").unwrap(),
                 SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
@@ -71,8 +86,59 @@ async fn test_v4_async_operation() {
                 .bucket(&env::var("BUCKET_NAME").unwrap())
                 .object(&new_object);
             obj.remove().await.unwrap();
+
+            // Test multipart operation
+            // TODO: use tmpfile crate to test on different OS
+            let temp_test_file = "/tmp/v4-async-7M";
+            let new_object = format!(
+                "{}-v4-async-{}",
+                env::var("BIG_OBJECT_NAME").unwrap(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            );
+
+            // TODO
+            // Test multipart download
+            let s3_pool = S3Pool::new(env::var("S3_HOST").unwrap())
+                .aws_v4(
+                    akey.to_string(),
+                    env::var("SECRET_KEY").unwrap(),
+                    env::var("REGION").unwrap(),
+                )
+                .part_size(env::var("PART_SIZE").unwrap().parse::<usize>().unwrap());
+            let obj = s3_pool
+                .bucket(&env::var("BUCKET_NAME").unwrap())
+                .object(&env::var("BIG_OBJECT_NAME").unwrap());
+            obj.download_file(temp_test_file).await.unwrap();
+
+            // Test multipart upload
+            let obj = S3Pool::new(env::var("S3_HOST").unwrap())
+                .aws_v4(
+                    akey.to_string(),
+                    env::var("SECRET_KEY").unwrap(),
+                    env::var("REGION").unwrap(),
+                )
+                .part_size(env::var("PART_SIZE").unwrap().parse::<usize>().unwrap())
+                .bucket(&env::var("BUCKET_NAME").unwrap())
+                .object(&new_object);
+            obj.upload_file(temp_test_file).await.unwrap();
+
+            // Delete
+            let obj = S3Pool::new(env::var("S3_HOST").unwrap())
+                .aws_v4(
+                    akey.to_string(),
+                    env::var("SECRET_KEY").unwrap(),
+                    env::var("REGION").unwrap(),
+                )
+                .bucket(&env::var("BUCKET_NAME").unwrap())
+                .object(&new_object);
+            obj.remove().await.unwrap();
         }
-        Err(_) => (),
+        Err(_) => {
+            println!("There is no access key, skip test");
+        }
     }
 }
 

@@ -9,6 +9,8 @@ pub enum Error {
     // JSONParseError(serde_json::Error),
     #[fail(display = "The response should be XML: {}", 0)]
     XMLParseError(quick_xml::Error),
+    #[fail(display = "The field {} not found in response", 0)]
+    FieldNotFound(&'static str),
     #[fail(display = "Unexpected input from user: {}", 0)]
     UserError(&'static str),
     #[fail(display = "Can not make a request: {}", 0)]
@@ -25,6 +27,8 @@ pub enum Error {
     ResourceUrlError(String),
     #[fail(display = "Pools should be initialized before pull or push on canal")]
     PoolUninitializeError(),
+    #[fail(display = "Header parsing error")]
+    HeaderParsingError(),
 }
 
 impl From<std::io::Error> for Error {
@@ -48,5 +52,11 @@ impl From<url::ParseError> for Error {
 impl From<reqwest::Error> for Error {
     fn from(err: reqwest::Error) -> Self {
         Error::ReqwestError(err.to_string())
+    }
+}
+
+impl From<reqwest::header::ToStrError> for Error {
+    fn from(_err: reqwest::header::ToStrError) -> Self {
+        Error::HeaderParsingError()
     }
 }

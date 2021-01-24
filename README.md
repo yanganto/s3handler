@@ -8,6 +8,7 @@ Here is the [document](https://docs.rs/s3handler/).
 
 
 ### Blocking API is ready
+
 use s3handler = { features = ["blocking"] }
 
 ```rust

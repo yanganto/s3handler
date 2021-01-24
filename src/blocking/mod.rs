@@ -25,7 +25,7 @@ pub use crate::utils::UrlStyle;
 use aws::{AWS2Client, AWS4Client};
 use upload_pool::{MultiUploadParameters, UploadRequestPool, BYTE_PERPART};
 
-use crate::utils::{s3object_list_xml_parser, S3Convert, S3Object};
+use crate::utils::{s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object};
 use failure;
 use log::{debug, error, info};
 use mime_guess::from_path;
@@ -35,7 +35,7 @@ use reqwest::{blocking::Response, StatusCode};
 use serde_derive::Deserialize;
 use serde_json;
 
-mod aws;
+pub mod aws;
 mod upload_pool;
 
 static RESPONSE_CONTENT_FORMAT: &'static str =
@@ -336,6 +336,7 @@ impl Handler<'_> {
                                         Some(cap[2].to_string()),
                                         Some(cap[3].to_string()),
                                         Some(cap[5].to_string()),
+                                        None, // TODO: test with cech
                                     )
                                 }),
                         );
@@ -358,7 +359,7 @@ impl Handler<'_> {
         let mut output = Vec::new();
         let mut res: String;
         let s3_object = S3Object::from(prefix.unwrap_or("s3://").to_string());
-        let s3_bucket = S3Object::new(s3_object.bucket, None, None, None, None);
+        let s3_bucket = S3Object::new(s3_object.bucket, None, None, None, None, None);
         match s3_bucket.bucket.clone() {
             Some(b) => {
                 let re = Regex::new(RESPONSE_CONTENT_FORMAT).unwrap();
@@ -397,6 +398,7 @@ impl Handler<'_> {
                                     Some(cap[2].to_string()),
                                     Some(cap[3].to_string()),
                                     Some(cap[5].to_string()),
+                                    None, // TODO: test with ceph server
                                 )
                             }));
                         }
@@ -420,6 +422,7 @@ impl Handler<'_> {
                             output.extend(bucket_list.iter().map(|b| {
                                 S3Convert::new(
                                     Some(b["Name"].as_str().unwrap().to_string()),
+                                    None,
                                     None,
                                     None,
                                     None,
@@ -461,43 +464,14 @@ impl Handler<'_> {
         )
         .unwrap_or("")
         .to_string();
-        let mut upload_id = "".to_string();
-        match self.format {
+        let upload_id = match self.format {
             Format::JSON => {
                 let re = Regex::new(r#""UploadId":"(?P<upload_id>[^"]+)""#).unwrap();
                 let caps = re.captures(&res).expect("Upload ID missing");
-                upload_id = caps["upload_id"].to_string();
+                caps["upload_id"].to_string()
             }
-            Format::XML => {
-                let mut reader = Reader::from_str(&res);
-                let mut in_tag = false;
-                let mut buf = Vec::new();
-
-                loop {
-                    match reader.read_event(&mut buf) {
-                        Ok(Event::Start(ref e)) => {
-                            if e.name() == b"UploadId" {
-                                in_tag = true;
-                            }
-                        }
-                        Ok(Event::End(ref e)) => {
-                            if e.name() == b"UploadId" {
-                                in_tag = false;
-                            }
-                        }
-                        Ok(Event::Text(e)) => {
-                            if in_tag {
-                                upload_id = e.unescape_and_decode(&reader).unwrap();
-                            }
-                        }
-                        Ok(Event::Eof) => break,
-                        Err(e) => return Err(Error::XMLParseError(e).into()),
-                        _ => (),
-                    }
-                    buf.clear();
-                }
-            }
-        }
+            Format::XML => upload_id_xml_parser(&res)?,
+        };
 
         info!("upload id: {}", upload_id);
 

@@ -62,7 +62,7 @@ impl S3Client for AWS2Client<'_> {
         let time_str = utc.to_rfc2822();
 
         // NOTE: ceph has bug using x-amz-date
-        let mut signed_headers = vec![("Date", time_str.as_str())];
+        let mut signed_headers = vec![("date", time_str.as_str())];
 
         let request_headers_name: Vec<String> =
             headers.into_iter().map(|x| x.0.to_string()).collect();
