@@ -1001,7 +1001,10 @@ impl<'a> From<&'a CredentialConfig> for Handler<'a> {
                     access_key: &credential.access_key,
                     secret_key: &credential.secret_key,
                     host: &credential.host,
-                    region: credential.region.clone().unwrap_or("us-east-1".to_string()),
+                    region: credential
+                        .region
+                        .clone()
+                        .unwrap_or(DEFAULT_REGION.to_string()),
                 }),
             },
         }

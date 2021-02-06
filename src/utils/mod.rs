@@ -4,6 +4,8 @@ use url::Url;
 
 use crate::error::Error;
 
+pub const DEFAULT_REGION: &'static str = "us-east-1";
+
 /// # Flexible S3 format parser
 /// - bucket - the objeck belonge to which
 /// - key - the object key
