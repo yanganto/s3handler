@@ -25,7 +25,9 @@ pub use crate::utils::UrlStyle;
 use aws::{AWS2Client, AWS4Client};
 use upload_pool::{MultiUploadParameters, UploadRequestPool, BYTE_PERPART};
 
-use crate::utils::{s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object};
+use crate::utils::{
+    s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object, DEFAULT_REGION,
+};
 use failure;
 use log::{debug, error, info};
 use mime_guess::from_path;
@@ -181,6 +183,10 @@ impl ResponseHandler for Response {
 }
 
 impl Handler<'_> {
+    pub fn is_secure(&self) -> bool {
+        self.secure
+    }
+
     fn request(
         &mut self,
         method: &str,
@@ -1001,7 +1007,10 @@ impl<'a> From<&'a CredentialConfig> for Handler<'a> {
                     access_key: &credential.access_key,
                     secret_key: &credential.secret_key,
                     host: &credential.host,
-                    region: credential.region.clone().unwrap_or("us-east-1".to_string()),
+                    region: credential
+                        .region
+                        .clone()
+                        .unwrap_or(DEFAULT_REGION.to_string()),
                 }),
             },
         }

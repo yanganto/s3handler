@@ -30,15 +30,15 @@
 //! This treat all data as pool and create a canal to bridge two pool.
 //! It is easy to management and sync data from folder to S3, S3 to S3, event folder to folder.
 //!
-//! >>>
+//! >>>no_run
 //!        +------+
-//!        | Pool | (UpPool)  modify by `from_*` api
+//!        | Pool | (UpPool)  modify by *from_* prefixed api
 //!        +------+
 //!          |  ^
 //!     Pull |  | Push
 //!          v  |
 //!        +------+
-//!        | Pool | (DownPool) modify by `toward_*` api
+//!        | Pool | (DownPool) modify by *toward_* prefixed api
 //!        +------+
 //! >>>
 //!

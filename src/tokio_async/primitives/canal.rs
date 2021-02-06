@@ -34,29 +34,49 @@ impl fmt::Debug for dyn DataPool {
     }
 }
 
+/// A canal presets a object link for two object from resource pool to pool.
+/// If everything is set, the async api can pull/push the objects.
+///
+/// The `download_file`, and `upload_file` api will setup the up pool as s3 pool,
+/// and set up the down pool as file pool for the most usage case.
+///
+/// The terms `object`, `key`, `bucket`, `folder`, `path` may be easiler for readness in coding,
+/// so there are several similar methods help you to setup things.
+/// If you down want these duplicate functions, you can enable the `slim` feature.
 impl Canal {
+    /// Check the two pools are set or not
     pub fn is_connect(&self) -> bool {
         self.up_pool.is_some() && self.down_pool.is_some()
     }
 
-    // Begin of short cut api to file pool
+    /// Set downd pool as file pool, and toward to the `resource_location`
     pub fn toward(mut self, resource_location: &str) -> Result<Self, Error> {
         self.toward_pool(Box::new(FilePool::new(resource_location)?));
         self.upstream_object = Some(resource_location.to_string().into());
         Ok(self)
     }
+
+    /// Set up pool as file pool, and from to the `resource_location`
     pub fn from(mut self, resource_location: &str) -> Result<Self, Error> {
         self.from_pool(Box::new(FilePool::new(resource_location)?));
         self.downstream_object = Some(resource_location.to_string().into());
         Ok(self)
     }
 
+    /// Download object from s3 pool to file pool
+    /// This function set file pool as down pool and s3 pool as up pool
+    /// then toward to the `resource_location`,
+    /// pull the object from uppool into down pool.
     pub async fn download_file(mut self, resource_location: &str) -> Result<(), Error> {
         self.toward_pool(Box::new(FilePool::new(resource_location)?));
         self.downstream_object = Some(resource_location.to_string().into());
         Ok(self.pull().await?)
     }
 
+    /// Upload object from file pool to s3 pool
+    /// This function set file pool as down pool and s3 pool as up pool
+    /// then toward to the `resource_location`,
+    /// push the object from uppool into down pool.
     pub async fn upload_file(mut self, resource_location: &str) -> Result<(), Error> {
         self.toward_pool(Box::new(FilePool::new(resource_location)?));
         self.downstream_object = Some(resource_location.to_string().into());
@@ -65,9 +85,12 @@ impl Canal {
     // End of short cut api to file pool
 
     // Begin of setting api
+    /// Setup the up pool
     pub fn from_pool(&mut self, pool: Box<dyn DataPool>) {
         self.up_pool = Some(pool);
     }
+
+    /// Setup the down pool
     pub fn toward_pool(&mut self, pool: Box<dyn DataPool>) {
         self.down_pool = Some(pool);
     }
@@ -106,20 +129,28 @@ impl Canal {
         self
     }
 
+    /// Setup the object for the first pool connected by canal,
+    /// This api can be used without fully setting up two pools,
+    /// and just set up the object as you what you think.
     pub fn object(self, object_name: &str) -> Self {
         self._object(object_name)
     }
 
+    /// The same as `object()`
     #[cfg(not(feature = "slim"))]
     pub fn key(self, key_name: &str) -> Self {
         self._object(key_name)
     }
 
+    /// Setup the bucket for the first pool connected by canal,
+    /// This api can be used without fully setting up two pools,
+    /// and just set up the object as you what you think.
     pub fn bucket(self, bucket_name: &str) -> Self {
         self._bucket(bucket_name)
     }
 
     #[cfg(not(feature = "slim"))]
+    /// The same as `bucket()`
     pub fn folder(self, folder_name: &str) -> Self {
         self._bucket(folder_name)
     }
@@ -135,10 +166,12 @@ impl Canal {
         self.downstream_object = Some(o);
     }
 
+    /// Setup the object in the down pool
     pub fn toward_object(&mut self, object_name: &str) {
         self._toward_object(object_name)
     }
 
+    /// The same as `toward_object()`
     #[cfg(not(feature = "slim"))]
     pub fn toward_key(&mut self, object_name: &str) {
         self._toward_object(object_name)
@@ -151,15 +184,18 @@ impl Canal {
         self.downstream_object = Some(o);
     }
 
+    /// Setup the bucket in the down pool
     pub fn toward_bucket(&mut self, bucket_name: &str) {
         self._toward_bucket(bucket_name)
     }
 
+    /// The same as `toward_bucket()`
     #[cfg(not(feature = "slim"))]
     pub fn toward_folder(&mut self, folder_name: &str) {
         self._toward_bucket(folder_name)
     }
 
+    /// Setup the path in the down pool
     #[cfg(not(feature = "slim"))]
     pub fn toward_path(&mut self, path: &str) {
         self.downstream_object = Some(path.to_string().into());
@@ -176,10 +212,12 @@ impl Canal {
         self.upstream_object = Some(o);
     }
 
+    /// Setup the object in the up pool
     pub fn from_object(&mut self, object_name: &str) {
         self._from_object(object_name)
     }
 
+    /// The same as `from_object()`
     #[cfg(not(feature = "slim"))]
     pub fn from_key(&mut self, object_name: &str) {
         self._from_object(object_name)
@@ -192,15 +230,18 @@ impl Canal {
         self.upstream_object = Some(o);
     }
 
+    /// Setup the bucket in the up pool
     pub fn from_bucket(&mut self, bucket_name: &str) {
         self._from_bucket(bucket_name)
     }
 
+    /// The same as `from_bucket()`
     #[cfg(not(feature = "slim"))]
     pub fn from_folder(&mut self, folder_name: &str) {
         self._from_bucket(folder_name)
     }
 
+    /// Setup the path in the up pool
     #[cfg(not(feature = "slim"))]
     pub fn from_path(&mut self, path: &str) {
         self.upstream_object = Some(path.to_string().into());
@@ -208,6 +249,8 @@ impl Canal {
     // End of setting api
 
     // Begin of IO api
+    /// Push the object from down pool to up pool.
+    /// It will raise error if the canal is not will setup.
     pub async fn push(self) -> Result<(), Error> {
         match (self.up_pool, self.down_pool) {
             (Some(up_pool), Some(down_pool)) => {
@@ -227,6 +270,8 @@ impl Canal {
         }
     }
 
+    /// Pull the object from up pool to down pool.
+    /// It will raise error if the canal is not will setup.
     pub async fn pull(self) -> Result<(), Error> {
         match (self.up_pool, self.down_pool) {
             (Some(up_pool), Some(down_pool)) => {
@@ -246,6 +291,7 @@ impl Canal {
         }
     }
 
+    /// Remove the object in the up pool.
     pub async fn upstream_remove(self) -> Result<(), Error> {
         if let Some(upstream_object) = self.upstream_object {
             Ok(self
@@ -260,6 +306,7 @@ impl Canal {
         }
     }
 
+    /// Remove the object in the down pool.
     pub async fn downstream_remove(self) -> Result<(), Error> {
         if let Some(downstream_object) = self.downstream_object {
             Ok(self
@@ -274,6 +321,9 @@ impl Canal {
         }
     }
 
+    /// Remove the object depence on the first pool connected by the canal
+    /// This api can be used without fully setting up two pools,
+    /// and remove object as you what you think.
     pub async fn remove(self) -> Result<(), Error> {
         match self.default {
             PoolType::UpPool => self.upstream_remove().await,
@@ -281,6 +331,7 @@ impl Canal {
         }
     }
 
+    /// List the objects in the up pool.
     pub async fn upstream_list(self) -> Result<Box<dyn S3Folder>, Error> {
         Ok(self
             .up_pool
@@ -289,6 +340,7 @@ impl Canal {
             .await?)
     }
 
+    /// List the objects in the down pool.
     pub async fn downstream_list(self) -> Result<Box<dyn S3Folder>, Error> {
         Ok(self
             .down_pool
@@ -297,6 +349,9 @@ impl Canal {
             .await?)
     }
 
+    /// List the objects depence on the first pool connected by the canal
+    /// This api can be used without fully setting up two pools,
+    /// and list objects as you what you think.
     pub async fn list(self) -> Result<Box<dyn S3Folder>, Error> {
         match self.default {
             PoolType::UpPool => self.upstream_list().await,

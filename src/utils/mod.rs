@@ -4,6 +4,8 @@ use url::Url;
 
 use crate::error::Error;
 
+pub const DEFAULT_REGION: &'static str = "us-east-1";
+
 /// # Flexible S3 format parser
 /// - bucket - the objeck belonge to which
 /// - key - the object key
@@ -176,7 +178,7 @@ impl S3Convert for S3Object {
 }
 
 /// The request URL style
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum UrlStyle {
     /// Path style URL
     /// The bucket name will be listed in the URI
