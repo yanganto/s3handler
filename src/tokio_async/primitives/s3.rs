@@ -13,16 +13,20 @@ use reqwest::{
 };
 use rustc_serialize::hex::ToHex;
 use sha2::Sha256 as sha2_256;
+use std::fmt;
 use url::form_urlencoded;
 
 use super::canal::{Canal, PoolType};
+use crate::blocking::{AuthType, Handler};
 use crate::error::Error;
 use crate::tokio_async::traits::{DataPool, S3Folder};
-use crate::utils::{s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object, UrlStyle};
+use crate::utils::{
+    s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object, UrlStyle, DEFAULT_REGION,
+};
 
 type UTCTime = DateTime<Utc>;
 
-pub trait Authorizer: Send + Sync + DynClone {
+pub trait Authorizer: Send + Sync + DynClone + fmt::Debug {
     /// This method will setup the header and put the authorize string
     fn authorize(&self, _request: &mut Request, _now: &UTCTime) {
         unimplemented!()
@@ -34,14 +38,14 @@ pub trait Authorizer: Send + Sync + DynClone {
 
 dyn_clone::clone_trait_object!(Authorizer);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PublicAuthorizer {}
 
 impl Authorizer for PublicAuthorizer {
     fn authorize(&self, _requests: &mut Request, _now: &UTCTime) {}
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct V2Authorizer {
     pub access_key: String,
     pub secret_key: String,
@@ -88,7 +92,7 @@ impl Authorizer for V2Authorizer {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct V4Authorizer {
     pub access_key: String,
     pub secret_key: String,
@@ -175,8 +179,7 @@ impl Authorizer for V4Authorizer {
         self.region = region;
     }
 }
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct S3Pool {
     pub host: String,
     /// To use https or not, please note that integrity is secured by S3 protocol.
@@ -394,6 +397,79 @@ impl S3Pool {
             output.extend_from_slice(&r.bytes().await?);
         }
         Ok(output.into())
+    }
+}
+
+impl From<Handler<'_>> for S3Pool {
+    fn from(handler: Handler) -> Self {
+        let secure = handler.is_secure();
+        let Handler {
+            host,
+            access_key,
+            secret_key,
+            region,
+            auth_type,
+            url_style,
+            ..
+        } = handler;
+
+        let authorizer: Box<dyn Authorizer> = match auth_type {
+            AuthType::AWS4 => Box::new(V4Authorizer::new(
+                access_key.into(),
+                secret_key.into(),
+                region.unwrap_or(DEFAULT_REGION.to_string()),
+            )),
+            AuthType::AWS2 => Box::new(V2Authorizer::new(access_key.into(), secret_key.into())),
+        };
+
+        Self {
+            host: host.into(),
+            secure,
+            url_style,
+            client: Client::new(),
+            authorizer,
+            part_size: Some(5242880),
+            objects: Vec::with_capacity(1000),
+            start_after: None,
+        }
+    }
+}
+
+impl From<&Handler<'_>> for S3Pool {
+    fn from(handler: &Handler) -> Self {
+        let secure = handler.is_secure();
+        let Handler {
+            host,
+            access_key,
+            secret_key,
+            region,
+            auth_type,
+            url_style,
+            ..
+        } = handler;
+
+        let authorizer: Box<dyn Authorizer> = match auth_type {
+            AuthType::AWS4 => Box::new(V4Authorizer::new(
+                access_key.to_string(),
+                secret_key.to_string(),
+                region.clone().unwrap_or(DEFAULT_REGION.to_string()),
+            )),
+            AuthType::AWS2 => Box::new(V2Authorizer::new(
+                access_key.to_string(),
+                secret_key.to_string(),
+            )),
+        };
+
+        Self {
+            host: host.to_string(),
+            secure,
+            url_style: url_style.clone(),
+            client: Client::new(),
+            authorizer,
+            part_size: Some(5242880),
+            objects: Vec::with_capacity(1000),
+            start_after: None,
+        }
     }
 }
 
@@ -821,6 +897,7 @@ impl V4Signature for Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocking::CredentialConfig;
 
     #[tokio::test]
     async fn test_handle_list_response() {
@@ -828,5 +905,26 @@ mod tests {
         let mut pool = S3Pool::new("somewhere.in.the.world".to_string());
         pool.handle_list_response(s.to_string()).unwrap();
         assert!(pool.next_object().await.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_from_blocking_handle_to_s3_pool() {
+        let config = CredentialConfig {
+            host: "s3.us-east-1.amazonaws.com".to_string(),
+            access_key: "akey".to_string(),
+            secret_key: "skey".to_string(),
+            user: None,
+            region: None,  // default is us-east-1
+            s3_type: None, // default will try to config as AWS S3 handler
+            secure: None,  // dafault is false, because the integrity protect by HMAC
+        };
+        let handler = Handler::from(&config);
+        let mut pool = S3Pool::from(&handler);
+        let s3_pool = S3Pool::new("s3.us-east-1.amazonaws.com".to_string());
+        assert_eq!(pool.host, s3_pool.host);
+
+        pool = handler.into();
+        let s3_pool = S3Pool::new("s3.us-east-1.amazonaws.com".to_string());
+        assert_eq!(pool.host, s3_pool.host);
     }
 }

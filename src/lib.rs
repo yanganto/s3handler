@@ -32,13 +32,13 @@
 //!
 //! >>>
 //!        +------+
-//!        | Pool | (UpPool)  modify by `from_*` api
+//!        | Pool | (UpPool)  modify by *from_* prefixed api
 //!        +------+
 //!          |  ^
 //!     Pull |  | Push
 //!          v  |
 //!        +------+
-//!        | Pool | (DownPool) modify by `toward_*` api
+//!        | Pool | (DownPool) modify by *toward_* prefixed api
 //!        +------+
 //! >>>
 //!

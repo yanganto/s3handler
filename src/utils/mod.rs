@@ -178,7 +178,7 @@ impl S3Convert for S3Object {
 }
 
 /// The request URL style
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum UrlStyle {
     /// Path style URL
     /// The bucket name will be listed in the URI
