@@ -97,6 +97,9 @@ impl S3Client for AWS2Client<'_> {
 
         let action;
         match method {
+            "HEAD" => {
+                action = client.head(url.as_str());
+            }
             "GET" => {
                 action = client.get(url.as_str());
             }
@@ -177,6 +180,14 @@ impl S3Client for AWS4Client<'_> {
                 }
             }
         }
+        if request_headers_name.contains(&"range".to_string()) {
+            for h in headers.iter() {
+                if h.0 == "range" {
+                    request_headers.insert("range", h.1.parse().unwrap());
+                    signed_headers.push(("range", h.1));
+                }
+            }
+        }
         signed_headers.append(&mut vec![("X-AMZ-Date", time_str.as_str()), ("Host", host)]);
 
         // Support AWS delete marker feature
@@ -224,6 +235,9 @@ impl S3Client for AWS4Client<'_> {
 
         let action;
         match method {
+            "HEAD" => {
+                action = client.head(url.as_str());
+            }
             "GET" => {
                 action = client.get(url.as_str());
             }
