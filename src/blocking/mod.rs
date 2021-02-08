@@ -23,7 +23,8 @@ use std::str::FromStr;
 use crate::error::Error;
 pub use crate::utils::UrlStyle;
 use aws::{AWS2Client, AWS4Client};
-use upload_pool::{MultiUploadParameters, UploadRequestPool, BYTE_PERPART};
+use download_pool::{DownloadRequestPool, MultiDownloadParameters};
+use upload_pool::{MultiUploadParameters, UploadRequestPool};
 
 use crate::utils::{
     s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object, DEFAULT_REGION,
@@ -38,11 +39,13 @@ use serde_derive::Deserialize;
 use serde_json;
 
 pub mod aws;
+mod download_pool;
 mod upload_pool;
 
 static RESPONSE_CONTENT_FORMAT: &'static str =
     r#""Contents":\["([^"]+?)","([^"]+?)","\\"([^"]+?)\\"",([^"]+?),"([^"]+?)"(.*?)\]"#;
 static RESPONSE_MARKER_FORMAT: &'static str = r#""NextMarker":"([^"]+?)","#;
+static DEFAULT_PREPART_SIZE: u64 = 5242880;
 
 /// # The struct for credential config for each S3 cluster
 /// - host is a parameter for the server you want to link
@@ -154,6 +157,9 @@ pub struct Handler<'a> {
 
     // https for switch s3_client
     secure: bool,
+
+    // The chunck size for multipart
+    part_size: u64,
 }
 
 trait ResponseHandler {
@@ -455,7 +461,7 @@ impl Handler<'_> {
         s3_object: S3Object,
         headers: Vec<(&str, &str)>,
     ) -> Result<(), failure::Error> {
-        let total_part_number = (file_size / BYTE_PERPART + 1) as usize;
+        let total_part_number = (file_size / self.part_size + 1) as usize;
         debug!("upload file in {} parts", total_part_number);
         let res = std::str::from_utf8(
             &self
@@ -490,24 +496,25 @@ impl Handler<'_> {
             "{} part and {} workers to upload",
             total_part_number, worker_number
         );
+        let (host, uri) = match self.url_style {
+            UrlStyle::HOST => s3_object.virtural_host_style_links(self.domain_name.to_string()),
+            UrlStyle::PATH => s3_object.path_style_links(self.domain_name.to_string()),
+        };
         let mut rp = UploadRequestPool::new(
             self.auth_type,
             self.secure,
             self.access_key.to_string(),
             self.secret_key.to_string(),
-            self.host.to_string(),
+            host.to_string(),
+            uri,
             self.region.clone().unwrap_or("".to_string()),
             upload_id.clone(),
             worker_number,
         );
-        let (host, uri) = match self.url_style {
-            UrlStyle::HOST => s3_object.virtural_host_style_links(self.domain_name.to_string()),
-            UrlStyle::PATH => s3_object.path_style_links(self.domain_name.to_string()),
-        };
         loop {
             part += 1;
 
-            let mut buffer = [0; BYTE_PERPART as usize];
+            let mut buffer = vec![0; self.part_size as usize];
             let mut tail_buffer = Vec::new();
             if part == total_part_number {
                 fin.read_to_end(&mut tail_buffer)?;
@@ -517,20 +524,16 @@ impl Handler<'_> {
 
             if part == total_part_number {
                 rp.run(MultiUploadParameters {
-                    host: host.clone(),
-                    uri: uri.clone(),
                     part_number: part,
                     payload: tail_buffer,
                 });
             } else {
                 rp.run(MultiUploadParameters {
-                    host: host.clone(),
-                    uri: uri.clone(),
                     part_number: part,
                     payload: buffer.to_vec().clone(),
                 });
             };
-            if part as u64 * BYTE_PERPART >= file_size {
+            if part as u64 * self.part_size >= file_size {
                 break;
             }
         }
@@ -590,7 +593,7 @@ impl Handler<'_> {
             };
 
             debug!("upload file size: {}", file_size);
-            if file_size > BYTE_PERPART {
+            if file_size > self.part_size {
                 self.multipart_uplodad(file, file_size, s3_object, headers)?;
             } else {
                 content = Vec::new();
@@ -617,12 +620,57 @@ impl Handler<'_> {
                 .to_str()
                 .unwrap_or("s3download"),
         };
+        // TODO fetch size then multipart
+        let headers = self
+            .request(
+                "HEAD",
+                &s3_object,
+                &Vec::new(),
+                &mut Vec::new(),
+                &Vec::new(),
+            )?
+            .1;
+        let size = if headers.contains_key(reqwest::header::CONTENT_LENGTH) {
+            headers[reqwest::header::CONTENT_LENGTH]
+                .to_str()?
+                .parse::<u64>()
+                .unwrap_or_default()
+        } else {
+            0
+        };
 
-        write(
-            fout,
+        let data = if size > 0 && size > self.part_size {
+            let total_part_number = (size / self.part_size + 1) as usize;
+            let worker_number = cmp::min(10, total_part_number);
+            let (host, uri) = match self.url_style {
+                UrlStyle::HOST => s3_object.virtural_host_style_links(self.domain_name.to_string()),
+                UrlStyle::PATH => s3_object.path_style_links(self.domain_name.to_string()),
+            };
+            let mut dp = DownloadRequestPool::new(
+                self.auth_type,
+                self.secure,
+                self.access_key.to_string(),
+                self.secret_key.to_string(),
+                host,
+                uri,
+                self.region.clone().unwrap_or("".to_string()),
+                size as usize,
+                worker_number,
+            );
+            let mut part = 0;
+            while part * self.part_size < size {
+                let end = cmp::min(size, (part + 1) * self.part_size) as usize;
+                let start = (part * self.part_size) as usize;
+                dp.run(MultiDownloadParameters(start, end));
+                part += 1;
+            }
+            dp.wait()?
+        } else {
             self.request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())?
-                .0,
-        )?;
+                .0
+        };
+        write(fout, data)?;
+
         Ok(())
     }
 
@@ -972,6 +1020,7 @@ impl<'a> From<&'a CredentialConfig> for Handler<'a> {
                 region: credential.region.clone(),
                 secure: credential.secure.unwrap_or(false),
                 domain_name: credential.host.to_string(),
+                part_size: DEFAULT_PREPART_SIZE,
             },
             "ceph" => Handler {
                 access_key: &credential.access_key,
@@ -991,6 +1040,7 @@ impl<'a> From<&'a CredentialConfig> for Handler<'a> {
                 region: credential.region.clone(),
                 secure: credential.secure.unwrap_or(false),
                 domain_name: credential.host.to_string(),
+                part_size: DEFAULT_PREPART_SIZE,
             },
             _ => Handler {
                 access_key: &credential.access_key,
@@ -1012,6 +1062,7 @@ impl<'a> From<&'a CredentialConfig> for Handler<'a> {
                         .clone()
                         .unwrap_or(DEFAULT_REGION.to_string()),
                 }),
+                part_size: DEFAULT_PREPART_SIZE,
             },
         }
     }

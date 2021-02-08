@@ -6,19 +6,17 @@ use std::{thread, time};
 use crate::blocking::aws::{AWS2Client, AWS4Client};
 use crate::blocking::{AuthType, S3Client};
 use crate::error::Error;
-use log::{debug, info};
+use log::{debug, error, info};
 
-#[derive(Default)]
-pub struct MultiUploadParameters {
-    pub part_number: usize,
-    pub payload: Vec<u8>,
-}
+#[derive(Default, Debug, Clone)]
+pub struct MultiDownloadParameters(pub usize, pub usize);
 
-pub struct UploadRequestPool {
-    ch_data: Option<mpsc::Sender<Box<MultiUploadParameters>>>,
-    ch_result: mpsc::Receiver<Result<(usize, reqwest::header::HeaderMap), Error>>,
+pub struct DownloadRequestPool {
+    ch_data: Option<mpsc::Sender<Box<MultiDownloadParameters>>>,
+    ch_result: mpsc::Receiver<Result<MultiDownloadParameters, Error>>,
     total_worker: usize,
     total_jobs: usize,
+    data: Arc<Mutex<Vec<u8>>>,
 }
 
 fn acquire<'a, T>(s: &'a Arc<Mutex<T>>) -> MutexGuard<'a, T>
@@ -34,7 +32,7 @@ where
     l.expect("lock acuired")
 }
 
-impl UploadRequestPool {
+impl DownloadRequestPool {
     pub fn new(
         auth_type: AuthType,
         secure: bool,
@@ -43,23 +41,24 @@ impl UploadRequestPool {
         host: String,
         uri: String,
         region: String,
-        upload_id: String,
+        totoal_size: usize,
         total_worker: usize,
     ) -> Self {
         let (ch_s, ch_r) = mpsc::channel();
         let a_ch_r = Arc::new(Mutex::new(ch_r));
         let (ch_result_s, ch_result_r) = mpsc::channel();
         let a_ch_result_s = Arc::new(Mutex::new(ch_result_s));
+        let data = Arc::new(Mutex::new(vec![0; totoal_size]));
 
         for _ in 0..total_worker {
             let a_ch_r2 = a_ch_r.clone();
             let a_ch_result_s2 = a_ch_result_s.clone();
-            let upload = upload_id.clone();
             let akey = access_key.clone();
             let skey = secret_key.clone();
             let h = host.clone();
             let u = uri.clone();
             let r = region.clone();
+            let d = data.clone();
 
             std::thread::spawn(move || loop {
                 let s3_client: Box<dyn S3Client> = match auth_type {
@@ -79,7 +78,7 @@ impl UploadRequestPool {
                 let recv_end = a_ch_r2.lock().expect("worker recv end is expected");
                 let result_send_back_ch = acquire(&a_ch_result_s2);
                 loop {
-                    let p: Box<MultiUploadParameters> = match recv_end.recv() {
+                    let p: Box<MultiDownloadParameters> = match recv_end.recv() {
                         Ok(p) => p,
                         Err(e) => {
                             let r = acquire(&a_ch_result_s2);
@@ -89,39 +88,44 @@ impl UploadRequestPool {
                             return;
                         }
                     };
-                    if p.part_number == 0 {
-                        // Because part number is count from 1,
-                        // 0 is used to close the channel
+                    if p.0 == 0 && p.1 == 0 {
+                        // range(0, 0) is the stop signal
                         drop(recv_end);
                         drop(result_send_back_ch);
                         return;
                     }
 
                     match s3_client.request(
-                        "PUT",
+                        "GET",
                         &h,
                         &u,
-                        &mut vec![
-                            ("uploadId", upload.as_str()),
-                            ("partNumber", p.part_number.to_string().as_str()),
-                        ],
                         &mut Vec::new(),
-                        &p.payload,
+                        &mut vec![("range", &format!("bytes={}-{}", p.0, p.1 - 1))],
+                        &Vec::new(),
                     ) {
                         Ok(r) => {
-                            info!("Part {} uploading ...", p.part_number);
-                            let mut send_result =
-                                result_send_back_ch.send(Ok((p.part_number.clone(), r.2.clone())));
-                            while send_result.is_err() {
-                                info!("send back result error: {:?}", send_result);
-                                thread::sleep(time::Duration::from_millis(1000));
-                                send_result = result_send_back_ch
-                                    .send(Ok((p.part_number.clone(), r.2.clone())));
+                            info!("Range ({}, {}) downloading...", p.0, p.1);
+                            if r.1.len() == p.1 - p.0 {
+                                let mut inner = acquire(&d);
+                                inner[p.0..p.1].copy_from_slice(&r.1);
+                                let mut send_result = result_send_back_ch.send(Ok((*p).clone()));
+                                while send_result.is_err() {
+                                    info!("send back result error: {:?}", send_result);
+                                    thread::sleep(time::Duration::from_millis(1000));
+                                    send_result = result_send_back_ch.send(Ok((*p).clone()));
+                                }
+                            } else {
+                                error!(
+                                    "Range ({}, {}) download size not correct {}",
+                                    p.0,
+                                    p.1,
+                                    r.1.len()
+                                );
                             }
-                            info!("Part {} uploaded", p.part_number);
+                            info!("Range ({}, {}) download executed", p.0, p.1);
                         }
                         Err(e) => {
-                            info!("Error on uploading Part {}: {}", p.part_number, e);
+                            info!("Error on downloading Range ({}, {}): {}", p.0, p.1, e);
                             let rs = acquire(&a_ch_result_s2);
                             rs.send(Err(e)).expect("channel is full to handle messages");
                             drop(rs);
@@ -130,16 +134,17 @@ impl UploadRequestPool {
                 }
             });
         }
-        UploadRequestPool {
+        DownloadRequestPool {
             ch_data: Some(ch_s),
             total_worker,
             ch_result: ch_result_r,
             total_jobs: 0,
+            data,
         }
     }
-    pub fn run(&mut self, p: MultiUploadParameters) {
+    pub fn run(&mut self, p: MultiDownloadParameters) {
         if let Some(ref ch_s) = self.ch_data {
-            info!("sending part {} to worker", p.part_number);
+            info!("sending range ({}, {}) to worker", p.0, p.1);
             ch_s.send(Box::new(p))
                 .expect("channel is full to handle messages");
             self.total_jobs += 1;
@@ -148,20 +153,20 @@ impl UploadRequestPool {
     pub fn close(&self) {
         let mut close_sent = 0;
         while let Some(ref ch_s) = self.ch_data {
-            ch_s.send(Box::new(MultiUploadParameters {
-                part_number: 0,
+            ch_s.send(Box::new(MultiDownloadParameters {
                 ..Default::default()
             }))
             .expect("channel is full to handle messages");
             close_sent += 1;
             if close_sent == self.total_worker {
+                thread::sleep(time::Duration::from_millis(1000));
                 info!("request pool closed");
                 return;
             }
         }
     }
-    pub fn wait(mut self) -> Result<String, Error> {
-        let mut results = Vec::new();
+    pub fn wait(mut self) -> Result<Vec<u8>, Error> {
+        let mut results = Vec::<Result<MultiDownloadParameters, Error>>::new();
         self.ch_data.take();
         loop {
             thread::sleep(time::Duration::from_millis(1000));
@@ -171,26 +176,15 @@ impl UploadRequestPool {
                 .expect("channel is full to handle messages");
 
             results.push(result);
-            info!("{} parts uploaded", results.len());
+            info!("{} job excuted ", results.len());
+
             if results.len() == self.total_jobs {
                 self.close();
-                let mut content = format!("<CompleteMultipartUpload>");
                 for res in results {
                     debug!("{:?}", res);
-                    let r = res?;
-                    let part = r.0;
-                    let etag = r.1[reqwest::header::ETAG]
-                        .to_str()
-                        .expect("unexpected etag from server");
-
-                    info!("part: {}, etag: {}", part, etag);
-                    content.push_str(&format!(
-                        "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
-                        part, etag
-                    ));
                 }
-                content.push_str(&format!("</CompleteMultipartUpload>"));
-                return Ok(content);
+                let inner = self.data.lock().unwrap();
+                return Ok((&*inner).clone());
             }
         }
     }
