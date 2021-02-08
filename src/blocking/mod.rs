@@ -496,20 +496,21 @@ impl Handler<'_> {
             "{} part and {} workers to upload",
             total_part_number, worker_number
         );
+        let (host, uri) = match self.url_style {
+            UrlStyle::HOST => s3_object.virtural_host_style_links(self.domain_name.to_string()),
+            UrlStyle::PATH => s3_object.path_style_links(self.domain_name.to_string()),
+        };
         let mut rp = UploadRequestPool::new(
             self.auth_type,
             self.secure,
             self.access_key.to_string(),
             self.secret_key.to_string(),
-            self.host.to_string(),
+            host.to_string(),
+            uri,
             self.region.clone().unwrap_or("".to_string()),
             upload_id.clone(),
             worker_number,
         );
-        let (host, uri) = match self.url_style {
-            UrlStyle::HOST => s3_object.virtural_host_style_links(self.domain_name.to_string()),
-            UrlStyle::PATH => s3_object.path_style_links(self.domain_name.to_string()),
-        };
         loop {
             part += 1;
 
@@ -523,15 +524,11 @@ impl Handler<'_> {
 
             if part == total_part_number {
                 rp.run(MultiUploadParameters {
-                    host: host.clone(),
-                    uri: uri.clone(),
                     part_number: part,
                     payload: tail_buffer,
                 });
             } else {
                 rp.run(MultiUploadParameters {
-                    host: host.clone(),
-                    uri: uri.clone(),
                     part_number: part,
                     payload: buffer.to_vec().clone(),
                 });

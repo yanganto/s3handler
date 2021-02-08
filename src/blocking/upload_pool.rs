@@ -10,8 +10,6 @@ use log::{debug, info};
 
 #[derive(Default)]
 pub struct MultiUploadParameters {
-    pub host: String,
-    pub uri: String,
     pub part_number: usize,
     pub payload: Vec<u8>,
 }
@@ -43,6 +41,7 @@ impl UploadRequestPool {
         access_key: String,
         secret_key: String,
         host: String,
+        uri: String,
         region: String,
         upload_id: String,
         total_worker: usize,
@@ -59,6 +58,7 @@ impl UploadRequestPool {
             let akey = access_key.clone();
             let skey = secret_key.clone();
             let h = host.clone();
+            let u = uri.clone();
             let r = region.clone();
 
             std::thread::spawn(move || loop {
@@ -99,8 +99,8 @@ impl UploadRequestPool {
 
                     match s3_client.request(
                         "PUT",
-                        &p.host,
-                        &p.uri,
+                        &h,
+                        &u,
                         &mut vec![
                             ("uploadId", upload.as_str()),
                             ("partNumber", p.part_number.to_string().as_str()),
