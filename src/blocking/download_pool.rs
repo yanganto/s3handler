@@ -95,6 +95,7 @@ impl DownloadRequestPool {
                         return;
                     }
 
+                    info!("Range ({}, {}) downloading...", p.0, p.1);
                     match s3_client.request(
                         "GET",
                         &h,
@@ -104,7 +105,6 @@ impl DownloadRequestPool {
                         &Vec::new(),
                     ) {
                         Ok(r) => {
-                            info!("Range ({}, {}) downloading...", p.0, p.1);
                             if r.1.len() == p.1 - p.0 {
                                 let mut inner = acquire(&d);
                                 inner[p.0..p.1].copy_from_slice(&r.1);
@@ -144,7 +144,7 @@ impl DownloadRequestPool {
     }
     pub fn run(&mut self, p: MultiDownloadParameters) {
         if let Some(ref ch_s) = self.ch_data {
-            info!("sending range ({}, {}) to worker", p.0, p.1);
+            info!("sending range ({}, {}) request to worker", p.0, p.1);
             ch_s.send(Box::new(p))
                 .expect("channel is full to handle messages");
             self.total_jobs += 1;
