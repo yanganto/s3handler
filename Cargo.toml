@@ -3,7 +3,7 @@ name = "s3handler"
 version = "0.6.6"
 authors = ["Antonio Yang <antonio.yang@siliconmotion.com.tw>"]
 edition = "2018"
-description = "An s3 handler for s3rs s3fs"
+description = "An s3 handler for s3rs nu-shell-s3-plugin"
 license = "MIT"
 
 [dependencies]
