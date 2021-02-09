@@ -13,10 +13,10 @@ pub struct MultiDownloadParameters(pub usize, pub usize);
 
 pub struct DownloadRequestPool {
     ch_data: Option<mpsc::Sender<Box<MultiDownloadParameters>>>,
-    ch_result: mpsc::Receiver<Result<MultiDownloadParameters, Error>>,
+    ch_result: mpsc::Receiver<Result<(MultiDownloadParameters, Vec<u8>), Error>>,
     total_worker: usize,
     total_jobs: usize,
-    data: Arc<Mutex<Vec<u8>>>,
+    data: Vec<u8>,
 }
 
 fn acquire<'a, T>(s: &'a Arc<Mutex<T>>) -> MutexGuard<'a, T>
@@ -48,7 +48,7 @@ impl DownloadRequestPool {
         let a_ch_r = Arc::new(Mutex::new(ch_r));
         let (ch_result_s, ch_result_r) = mpsc::channel();
         let a_ch_result_s = Arc::new(Mutex::new(ch_result_s));
-        let data = Arc::new(Mutex::new(vec![0; totoal_size]));
+        let data = vec![0; totoal_size];
 
         for _ in 0..total_worker {
             let a_ch_r2 = a_ch_r.clone();
@@ -58,7 +58,6 @@ impl DownloadRequestPool {
             let h = host.clone();
             let u = uri.clone();
             let r = region.clone();
-            let d = data.clone();
 
             std::thread::spawn(move || loop {
                 let s3_client: Box<dyn S3Client> = match auth_type {
@@ -106,13 +105,13 @@ impl DownloadRequestPool {
                     ) {
                         Ok(r) => {
                             if r.1.len() == p.1 - p.0 {
-                                let mut inner = acquire(&d);
-                                inner[p.0..p.1].copy_from_slice(&r.1);
-                                let mut send_result = result_send_back_ch.send(Ok((*p).clone()));
+                                let mut send_result =
+                                    result_send_back_ch.send(Ok(((*p).clone(), r.1.clone())));
                                 while send_result.is_err() {
                                     info!("send back result error: {:?}", send_result);
                                     thread::sleep(time::Duration::from_millis(1000));
-                                    send_result = result_send_back_ch.send(Ok((*p).clone()));
+                                    send_result =
+                                        result_send_back_ch.send(Ok(((*p).clone(), r.1.clone())));
                                 }
                             } else {
                                 error!(
@@ -166,7 +165,7 @@ impl DownloadRequestPool {
         }
     }
     pub fn wait(mut self) -> Result<Vec<u8>, Error> {
-        let mut results = Vec::<Result<MultiDownloadParameters, Error>>::new();
+        let mut results = 0;
         self.ch_data.take();
         loop {
             thread::sleep(time::Duration::from_millis(1000));
@@ -175,16 +174,21 @@ impl DownloadRequestPool {
                 .recv()
                 .expect("channel is full to handle messages");
 
-            results.push(result);
-            info!("{} job excuted ", results.len());
-
-            if results.len() == self.total_jobs {
-                self.close();
-                for res in results {
-                    debug!("{:?}", res);
+            match result {
+                Ok((para, data)) => {
+                    self.data[para.0..para.1].copy_from_slice(&data);
+                    debug!("{:?}", para);
                 }
-                let inner = self.data.lock().unwrap();
-                return Ok((&*inner).clone());
+                Err(e) => {
+                    error!("{}", e);
+                }
+            }
+            results += 1;
+            info!("{} job excuted ", results);
+
+            if results == self.total_jobs {
+                self.close();
+                return Ok(self.data);
             }
         }
     }

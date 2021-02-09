@@ -97,6 +97,7 @@ impl UploadRequestPool {
                         return;
                     }
 
+                    info!("Part {} uploading ...", p.part_number);
                     match s3_client.request(
                         "PUT",
                         &h,
@@ -109,7 +110,6 @@ impl UploadRequestPool {
                         &p.payload,
                     ) {
                         Ok(r) => {
-                            info!("Part {} uploading ...", p.part_number);
                             let mut send_result =
                                 result_send_back_ch.send(Ok((p.part_number.clone(), r.2.clone())));
                             while send_result.is_err() {
