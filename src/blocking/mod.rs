@@ -291,7 +291,7 @@ impl Handler<'_> {
         let mut output = Vec::new();
         let content_re = Regex::new(RESPONSE_CONTENT_FORMAT).unwrap();
         let next_marker_re = Regex::new(RESPONSE_MARKER_FORMAT).unwrap();
-        let s3_object = S3Object::from("s3://".to_string());
+        let s3_object = S3Object::from("s3://");
         let res = &self
             .request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())?
             .0;
@@ -316,7 +316,7 @@ impl Handler<'_> {
             }
         }
         for bucket in buckets {
-            let s3_object = S3Object::from(format!("s3://{}", bucket));
+            let s3_object = S3Object::from(format!("s3://{}", bucket).as_str());
             let mut next_marker = Some("".to_string());
             while next_marker.is_some() {
                 let body = &self
@@ -370,7 +370,7 @@ impl Handler<'_> {
     pub fn ls(&mut self, prefix: Option<&str>) -> Result<Vec<S3Object>, failure::Error> {
         let mut output = Vec::new();
         let mut res: String;
-        let s3_object = S3Object::from(prefix.unwrap_or("s3://").to_string());
+        let s3_object = S3Object::from(prefix.unwrap_or("s3://"));
         let s3_bucket = S3Object::new(s3_object.bucket, None, None, None, None, None);
         match s3_bucket.bucket.clone() {
             Some(b) => {
@@ -422,7 +422,7 @@ impl Handler<'_> {
                 }
             }
             None => {
-                let s3_object = S3Object::from("s3://".to_string());
+                let s3_object = S3Object::from("s3://");
                 let body = &self
                     .request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())?
                     .0;
@@ -557,7 +557,7 @@ impl Handler<'_> {
             return Err(Error::UserError("please specify the file and the destiney").into());
         }
 
-        let mut s3_object = S3Object::from(dest.to_string());
+        let mut s3_object = S3Object::from(dest);
 
         let mut content: Vec<u8>;
 
@@ -607,7 +607,7 @@ impl Handler<'_> {
 
     /// Download an object from S3 service
     pub fn get(&mut self, src: &str, file: Option<&str>) -> Result<(), failure::Error> {
-        let s3_object = S3Object::from(src.to_string());
+        let s3_object = S3Object::from(src);
         if s3_object.key.is_none() {
             return Err(Error::UserError("Please specific the object").into());
         }
@@ -676,7 +676,7 @@ impl Handler<'_> {
 
     /// Show the content and the content type of an object
     pub fn cat(&mut self, src: &str) -> Result<(String, Option<String>), failure::Error> {
-        let s3_object = S3Object::from(src.to_string());
+        let s3_object = S3Object::from(src);
         if s3_object.key.is_none() {
             return Err(Error::UserError("Please specific the object").into());
         }
@@ -702,7 +702,7 @@ impl Handler<'_> {
         headers: &mut Vec<(&str, &str)>,
     ) -> Result<(), failure::Error> {
         debug!("headers: {:?}", headers);
-        let s3_object = S3Object::from(src.to_string());
+        let s3_object = S3Object::from(src);
         if s3_object.key.is_none() {
             return Err(Error::UserError("Please specific the object").into());
         }
@@ -717,7 +717,7 @@ impl Handler<'_> {
 
     /// Make a new bucket
     pub fn mb(&mut self, bucket: &str) -> Result<(), failure::Error> {
-        let s3_object = S3Object::from(bucket.to_string());
+        let s3_object = S3Object::from(bucket);
         if s3_object.bucket.is_none() {
             return Err(Error::UserError("please specific the bucket name").into());
         }
@@ -727,7 +727,7 @@ impl Handler<'_> {
 
     /// Remove a bucket
     pub fn rb(&mut self, bucket: &str) -> Result<(), failure::Error> {
-        let s3_object = S3Object::from(bucket.to_string());
+        let s3_object = S3Object::from(bucket);
         if s3_object.bucket.is_none() {
             return Err(Error::UserError("please specific the bucket name").into());
         }
@@ -745,7 +745,7 @@ impl Handler<'_> {
     pub fn list_tag(&mut self, target: &str) -> Result<(), failure::Error> {
         let res: String;
         debug!("target: {:?}", target);
-        let s3_object = S3Object::from(target.to_string());
+        let s3_object = S3Object::from(target);
         if s3_object.key.is_none() {
             return Err(Error::UserError("Please specific the object").into());
         }
@@ -777,7 +777,7 @@ impl Handler<'_> {
     ) -> Result<(), failure::Error> {
         debug!("target: {:?}", target);
         debug!("tags: {:?}", tags);
-        let s3_object = S3Object::from(target.to_string());
+        let s3_object = S3Object::from(target);
         if s3_object.key.is_none() {
             return Err(Error::UserError("Please specific the object").into());
         }
@@ -805,7 +805,7 @@ impl Handler<'_> {
     /// Remove aa tag from an object
     pub fn del_tag(&mut self, target: &str) -> Result<(), failure::Error> {
         debug!("target: {:?}", target);
-        let s3_object = S3Object::from(target.to_string());
+        let s3_object = S3Object::from(target);
         if s3_object.key.is_none() {
             return Err(Error::UserError("Please specific the object").into());
         }
@@ -826,8 +826,8 @@ impl Handler<'_> {
         target: &str,
         options: &Vec<(&str, &str)>,
     ) -> Result<(), failure::Error> {
-        let s3_admin_bucket_object = S3Convert::new_from_uri("/admin/buckets".to_string());
-        let s3_object = S3Object::from(target.to_string());
+        let s3_admin_bucket_object = S3Convert::new_from_uri("/admin/buckets");
+        let s3_object = S3Object::from(target);
         let mut query_strings = options.clone();
         if s3_object.bucket.is_none() {
             return Err(Error::UserError("S3 format not correct.").into());
@@ -867,7 +867,7 @@ impl Handler<'_> {
         let mut query_strings = Vec::new();
         match url.find('?') {
             Some(idx) => {
-                s3_object = S3Object::from(url[..idx].to_string());
+                s3_object = S3Object::from(&url[..idx]);
                 raw_qs.push_str(&String::from_str(&url[idx + 1..]).unwrap());
                 for q_pair in raw_qs.split('&') {
                     match q_pair.find('=') {
@@ -880,7 +880,7 @@ impl Handler<'_> {
                 }
             }
             None => {
-                s3_object = S3Object::from(url.to_string());
+                s3_object = S3Object::from(url);
             }
         }
 
@@ -1073,7 +1073,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_s3object_for_dummy_folder() {
-        let s3_object = S3Object::from("s3://bucket/dummy_folder/".to_string());
+        let s3_object = S3Object::from("s3://bucket/dummy_folder/");
         assert_eq!(s3_object.bucket, Some("bucket".to_string()));
         assert_eq!(s3_object.key, Some("/dummy_folder/".to_string()));
         assert_eq!(
@@ -1083,14 +1083,14 @@ mod tests {
     }
     #[test]
     fn test_s3object_for_bucket() {
-        let s3_object = S3Object::from("s3://bucket".to_string());
+        let s3_object = S3Object::from("s3://bucket");
         assert_eq!(s3_object.bucket, Some("bucket".to_string()));
         assert_eq!(s3_object.key, None);
         assert_eq!("s3://bucket".to_string(), String::from(s3_object));
     }
     #[test]
     fn test_s3object_for_dummy_folder_from_uri() {
-        let s3_object: S3Object = S3Convert::new_from_uri("/bucket/dummy_folder/".to_string());
+        let s3_object: S3Object = S3Convert::new_from_uri("/bucket/dummy_folder/");
         assert_eq!(
             "s3://bucket/dummy_folder/".to_string(),
             String::from(s3_object)
@@ -1098,23 +1098,23 @@ mod tests {
     }
     #[test]
     fn test_s3object_for_root() {
-        let s3_object = S3Object::from("s3://".to_string());
+        let s3_object = S3Object::from("s3://");
         assert_eq!(s3_object.bucket, None);
         assert_eq!(s3_object.key, None);
     }
     #[test]
     fn test_s3object_for_bucket_from_uri() {
-        let s3_object: S3Object = S3Convert::new_from_uri("/bucket".to_string());
+        let s3_object: S3Object = S3Convert::new_from_uri("/bucket");
         assert_eq!("s3://bucket".to_string(), String::from(s3_object));
     }
     #[test]
     fn test_s3object_for_slash_end_bucket_from_uri() {
-        let s3_object: S3Object = S3Convert::new_from_uri("/bucket/".to_string());
+        let s3_object: S3Object = S3Convert::new_from_uri("/bucket/");
         assert_eq!("s3://bucket".to_string(), String::from(s3_object));
     }
     #[test]
     fn test_s3object_for_bucket_from_bucket_name() {
-        let s3_object: S3Object = S3Convert::new_from_uri("bucket".to_string());
+        let s3_object: S3Object = S3Convert::new_from_uri("bucket");
         assert_eq!("s3://bucket".to_string(), String::from(s3_object));
     }
 }

@@ -207,7 +207,17 @@ impl S3Pool {
         Canal {
             up_pool: Some(Box::new(self)),
             down_pool: None,
-            upstream_object: Some(bucket_name.to_string().into()),
+            upstream_object: Some(bucket_name.into()),
+            downstream_object: None,
+            default: PoolType::UpPool,
+        }
+    }
+
+    pub fn resource(self, s3_object: S3Object) -> Canal {
+        Canal {
+            up_pool: Some(Box::new(self)),
+            down_pool: None,
+            upstream_object: Some(s3_object),
             downstream_object: None,
             default: PoolType::UpPool,
         }
@@ -493,7 +503,6 @@ impl DataPool for S3Pool {
             let now = Utc::now();
             self.init_headers(request.headers_mut(), &now);
             self.authorizer.authorize(&mut request, &now);
-
             self.client.execute(request).await?
         };
         // TODO validate _r status code
@@ -568,23 +577,36 @@ impl DataPool for S3Pool {
 
         let r = self.client.execute(request).await?;
         let headers = r.headers();
-        desc.etag = Some(
-            headers[reqwest::header::ETAG]
-                .to_str()?
-                .to_string()
-                .replace('"', ""),
-        );
-        desc.mtime = Some(
-            headers[HeaderName::from_lowercase(b"last-modified").unwrap()]
-                .to_str()?
-                .into(),
-        );
-        desc.size = Some(
-            headers[reqwest::header::CONTENT_LENGTH]
-                .to_str()?
-                .parse::<usize>()
-                .unwrap_or_default(),
-        );
+        desc.etag = if headers.contains_key(reqwest::header::ETAG) {
+            Some(
+                headers[reqwest::header::ETAG]
+                    .to_str()?
+                    .to_string()
+                    .replace('"', ""),
+            )
+        } else {
+            None
+        };
+        desc.mtime = if headers.contains_key(HeaderName::from_lowercase(b"last-modified").unwrap())
+        {
+            Some(
+                headers[HeaderName::from_lowercase(b"last-modified").unwrap()]
+                    .to_str()?
+                    .into(),
+            )
+        } else {
+            None
+        };
+        desc.size = if headers.contains_key(reqwest::header::CONTENT_LENGTH) {
+            Some(
+                headers[reqwest::header::CONTENT_LENGTH]
+                    .to_str()?
+                    .parse::<usize>()
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        };
 
         // TODO: check out it is correct or not that the storage class is absent here
 

@@ -1,5 +1,3 @@
-use std::fmt;
-
 use super::file::FilePool;
 use crate::error::Error;
 use crate::tokio_async::traits::{DataPool, S3Folder};
@@ -14,8 +12,8 @@ pub enum PoolType {
 #[derive(Debug)]
 pub struct Canal {
     pub up_pool: Option<Box<dyn DataPool>>,
-    pub down_pool: Option<Box<dyn DataPool>>,
     pub upstream_object: Option<S3Object>,
+    pub down_pool: Option<Box<dyn DataPool>>,
     pub downstream_object: Option<S3Object>,
     pub(crate) default: PoolType,
     // TODO: feature: data transformer
@@ -27,11 +25,6 @@ pub struct Canal {
     // index & key of S3Object transformer
     // upstream_obj_desc_lambda:
     // downstream_obj_desc_lambda:
-}
-impl fmt::Debug for dyn DataPool {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Dynamic DataPool").finish()
-    }
 }
 
 /// A canal presets a object link for two object from resource pool to pool.
@@ -52,14 +45,14 @@ impl Canal {
     /// Set downd pool as file pool, and toward to the `resource_location`
     pub fn toward(mut self, resource_location: &str) -> Result<Self, Error> {
         self.toward_pool(Box::new(FilePool::new(resource_location)?));
-        self.upstream_object = Some(resource_location.to_string().into());
+        self.upstream_object = Some(resource_location.into());
         Ok(self)
     }
 
     /// Set up pool as file pool, and from to the `resource_location`
     pub fn from(mut self, resource_location: &str) -> Result<Self, Error> {
         self.from_pool(Box::new(FilePool::new(resource_location)?));
-        self.downstream_object = Some(resource_location.to_string().into());
+        self.downstream_object = Some(resource_location.into());
         Ok(self)
     }
 
@@ -69,7 +62,22 @@ impl Canal {
     /// pull the object from uppool into down pool.
     pub async fn download_file(mut self, resource_location: &str) -> Result<(), Error> {
         self.toward_pool(Box::new(FilePool::new(resource_location)?));
-        self.downstream_object = Some(resource_location.to_string().into());
+        self.downstream_object = Some(resource_location.into());
+        match self.downstream_object.take() {
+            Some(S3Object { bucket, key, .. }) if key.is_none() => {
+                self.downstream_object = Some(S3Object {
+                    bucket,
+                    key: self.upstream_object.clone().unwrap().key,
+                    ..Default::default()
+                });
+            }
+            Some(obj) => {
+                self.downstream_object = Some(obj);
+            }
+            None => {
+                panic!("never be here")
+            }
+        }
         Ok(self.pull().await?)
     }
 
@@ -79,7 +87,22 @@ impl Canal {
     /// push the object from uppool into down pool.
     pub async fn upload_file(mut self, resource_location: &str) -> Result<(), Error> {
         self.toward_pool(Box::new(FilePool::new(resource_location)?));
-        self.downstream_object = Some(resource_location.to_string().into());
+        self.downstream_object = Some(resource_location.into());
+        match self.downstream_object.take() {
+            Some(S3Object { bucket, key, .. }) if key.is_none() => {
+                self.downstream_object = Some(S3Object {
+                    bucket: Some(std::env::current_dir()?.to_string_lossy()[1..].into()),
+                    key: Some(format!("/{}", bucket.unwrap_or_default())),
+                    ..Default::default()
+                });
+            }
+            Some(obj) => {
+                self.downstream_object = Some(obj);
+            }
+            None => {
+                panic!("never be here")
+            }
+        }
         Ok(self.push().await?)
     }
     // End of short cut api to file pool
@@ -198,7 +221,7 @@ impl Canal {
     /// Setup the path in the down pool
     #[cfg(not(feature = "slim"))]
     pub fn toward_path(&mut self, path: &str) {
-        self.downstream_object = Some(path.to_string().into());
+        self.downstream_object = Some(path.into());
     }
 
     #[inline]
@@ -244,7 +267,7 @@ impl Canal {
     /// Setup the path in the up pool
     #[cfg(not(feature = "slim"))]
     pub fn from_path(&mut self, path: &str) {
-        self.upstream_object = Some(path.to_string().into());
+        self.upstream_object = Some(path.into());
     }
     // End of setting api
 

@@ -1,4 +1,4 @@
-use std::{env, path::Path};
+use std::path::Path;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -19,20 +19,14 @@ impl S3Folder for ReadDir {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FilePool {
     /// use "/" for *nix, "C://" for windows (not tested)
     pub drive: String,
 }
 impl Default for FilePool {
     fn default() -> Self {
-        Self {
-            drive: env::current_dir()
-                .expect("current dir is undetected")
-                .to_str()
-                .expect("current dir is not valid string")
-                .into(),
-        }
+        Self { drive: "/".into() }
     }
 }
 

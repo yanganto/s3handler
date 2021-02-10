@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use std::fmt::Debug;
 use url::Url;
 
 use super::primitives::{Canal, PoolType};
@@ -7,12 +8,12 @@ use crate::error::Error;
 use crate::utils::S3Object;
 
 #[async_trait]
-pub trait S3Folder {
+pub trait S3Folder: Debug {
     async fn next_object(&mut self) -> Result<Option<S3Object>, Error>;
 }
 
 #[async_trait]
-pub trait DataPool: Send + Sync {
+pub trait DataPool: Send + Sync + Debug {
     async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error>;
     async fn pull(&self, desc: S3Object) -> Result<Bytes, Error>;
     /// The index will be treated as a folder object to filter the list results
@@ -36,7 +37,7 @@ pub trait DataPool: Send + Sync {
                 up_pool: Some(Box::new(self)),
                 down_pool: None,
                 upstream_object: None,
-                downstream_object: Some(resource_location.to_string().into()),
+                downstream_object: Some(resource_location.into()),
                 default: PoolType::DownPool,
             }),
         }
@@ -50,7 +51,7 @@ pub trait DataPool: Send + Sync {
             _ => Ok(Canal {
                 up_pool: Some(Box::new(self)),
                 down_pool: None,
-                upstream_object: Some(resource_location.to_string().into()),
+                upstream_object: Some(resource_location.into()),
                 downstream_object: None,
                 default: PoolType::UpPool,
             }),
