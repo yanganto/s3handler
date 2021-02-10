@@ -238,27 +238,37 @@ impl S3Pool {
 
     pub fn aws_v2(mut self, access_key: String, secret_key: String) -> Self {
         self.authorizer = Box::new(V2Authorizer::new(access_key, secret_key));
+        self.url_style = UrlStyle::PATH;
         self
     }
 
     pub fn aws_v4(mut self, access_key: String, secret_key: String, region: String) -> Self {
         self.authorizer = Box::new(V4Authorizer::new(access_key, secret_key, region));
+        self.url_style = UrlStyle::HOST;
         self
     }
 
-    pub fn endpoint(&self, desc: S3Object) -> String {
-        let (host, uri) = match self.url_style {
-            UrlStyle::PATH => desc.path_style_links(self.host.clone()),
-            UrlStyle::HOST => desc.virtural_host_style_links(self.host.clone()),
+    pub fn endpoint_and_virturalhost(&self, desc: S3Object) -> (String, Option<String>) {
+        let ((host, uri), virturalhost) = match self.url_style {
+            UrlStyle::PATH => (desc.path_style_links(self.host.clone()), None),
+            UrlStyle::HOST => {
+                let (host, uri) = desc.virtural_host_style_links(self.host.clone());
+                ((host.clone(), uri), Some(host))
+            }
         };
         if self.secure {
-            format!("https://{}{}", host, uri)
+            (format!("https://{}{}", host, uri), virturalhost)
         } else {
-            format!("http://{}{}", host, uri)
+            (format!("http://{}{}", host, uri), virturalhost)
         }
     }
 
-    pub fn init_headers(&self, headers: &mut HeaderMap, now: &UTCTime) {
+    pub fn init_headers(
+        &self,
+        headers: &mut HeaderMap,
+        now: &UTCTime,
+        virturalhost: Option<String>,
+    ) {
         headers.insert(
             header::DATE,
             HeaderValue::from_str(now.to_rfc2822().as_str()).unwrap(),
@@ -267,7 +277,11 @@ impl S3Pool {
             header::USER_AGENT,
             HeaderValue::from_static("Rust S3 Handler"),
         );
-        headers.insert(header::HOST, HeaderValue::from_str(&self.host).unwrap());
+        if let Some(virtural_host) = virturalhost {
+            headers.insert(header::HOST, HeaderValue::from_str(&virtural_host).unwrap());
+        } else {
+            headers.insert(header::HOST, HeaderValue::from_str(&self.host).unwrap());
+        }
     }
 
     fn handle_list_response(&mut self, body: String) -> Result<(), Error> {
@@ -283,12 +297,16 @@ impl S3Pool {
     }
 
     /// Init multipart upload session, and return `multipart_id`
-    async fn init_multipart_upload(&self, url: String) -> Result<String, Error> {
+    async fn init_multipart_upload(
+        &self,
+        url: String,
+        virturalhost: Option<String>,
+    ) -> Result<String, Error> {
         let url = format!("{}?uploads", url);
         let mut request = self.client.post(&url).build()?;
 
         let now = Utc::now();
-        self.init_headers(request.headers_mut(), &now);
+        self.init_headers(request.headers_mut(), &now, virturalhost);
         self.authorizer.authorize(&mut request, &now);
 
         let r = self.client.execute(request).await?;
@@ -313,11 +331,10 @@ impl S3Pool {
             } else {
                 start + part_size
             };
+            let (endpoint, virtural_host) = self.endpoint_and_virturalhost(desc.clone());
             let url = format!(
                 "{}?uploadId={}&partNumber={}",
-                self.endpoint(desc.clone()),
-                multipart_id,
-                part_number
+                endpoint, multipart_id, part_number
             );
 
             let mut request = self
@@ -327,7 +344,7 @@ impl S3Pool {
                 .build()?;
 
             let now = Utc::now();
-            self.init_headers(request.headers_mut(), &now);
+            self.init_headers(request.headers_mut(), &now, virtural_host);
             self.authorizer.authorize(&mut request, &now);
             req_list.push(self.client.execute(request));
             start += part_size
@@ -355,10 +372,11 @@ impl S3Pool {
             ));
         }
         content.push_str(&format!("</CompleteMultipartUpload>"));
-        let url = format!("{}?uploadId={}", self.endpoint(desc), multipart_id);
+        let (endpoint, virturalhost) = self.endpoint_and_virturalhost(desc);
+        let url = format!("{}?uploadId={}", endpoint, multipart_id);
         let mut request = self.client.post(&url).body(content.into_bytes()).build()?;
         let now = Utc::now();
-        self.init_headers(request.headers_mut(), &now);
+        self.init_headers(request.headers_mut(), &now, virturalhost);
         self.authorizer.authorize(&mut request, &now);
         let r = self.client.execute(request).await?;
         Ok(r)
@@ -377,7 +395,7 @@ impl S3Pool {
             } else {
                 start + part_size
             };
-            let url = self.endpoint(desc.clone());
+            let (url, virturalhost) = self.endpoint_and_virturalhost(desc.clone());
 
             let mut request = self.client.get(&url).build()?;
 
@@ -388,7 +406,7 @@ impl S3Pool {
             );
 
             let now = Utc::now();
-            self.init_headers(headers, &now);
+            self.init_headers(headers, &now, virturalhost);
             self.authorizer.authorize(&mut request, &now);
             req_list.push(self.client.execute(request));
             start += part_size
@@ -488,9 +506,8 @@ impl DataPool for S3Pool {
     async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error> {
         let part_size = self.part_size.unwrap_or_default();
         let _r = if part_size > 0 && part_size < object.len() {
-            let multipart_id = self
-                .init_multipart_upload(self.endpoint(desc.clone()))
-                .await?;
+            let (endpoint, virturalhost) = self.endpoint_and_virturalhost(desc.clone());
+            let multipart_id = self.init_multipart_upload(endpoint, virturalhost).await?;
 
             let reqs = self
                 .generate_part_upload_requests(desc.clone(), &multipart_id, part_size, object)
@@ -498,10 +515,11 @@ impl DataPool for S3Pool {
             self.complete_multi_part_upload(reqs, desc, &multipart_id)
                 .await?
         } else {
-            let mut request = self.client.put(&self.endpoint(desc)).body(object).build()?;
+            let (endpoint, virturalhost) = self.endpoint_and_virturalhost(desc);
+            let mut request = self.client.put(&endpoint).body(object).build()?;
 
             let now = Utc::now();
-            self.init_headers(request.headers_mut(), &now);
+            self.init_headers(request.headers_mut(), &now, virturalhost);
             self.authorizer.authorize(&mut request, &now);
             self.client.execute(request).await?
         };
@@ -521,10 +539,11 @@ impl DataPool for S3Pool {
             Ok(output)
         } else {
             // TODO reuse the client setting and not only the reqest
-            let mut request = Request::new(Method::GET, Url::parse(&self.endpoint(desc))?);
+            let (endpoint, virturalhost) = self.endpoint_and_virturalhost(desc);
+            let mut request = Request::new(Method::GET, Url::parse(&endpoint)?);
 
             let now = Utc::now();
-            self.init_headers(request.headers_mut(), &now);
+            self.init_headers(request.headers_mut(), &now, virturalhost);
             self.authorizer.authorize(&mut request, &now);
 
             let r = self.client.execute(request).await?;
@@ -535,13 +554,11 @@ impl DataPool for S3Pool {
 
     async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error> {
         let mut pool = self.clone();
-        let mut request = Request::new(
-            Method::GET,
-            Url::parse(&self.endpoint(index.unwrap_or_default()))?,
-        );
+        let (endpoint, virturalhost) = self.endpoint_and_virturalhost(index.unwrap_or_default());
+        let mut request = Request::new(Method::GET, Url::parse(&endpoint)?);
 
         let now = Utc::now();
-        pool.init_headers(request.headers_mut(), &now);
+        pool.init_headers(request.headers_mut(), &now, virturalhost);
         pool.authorizer.authorize(&mut request, &now);
         let body = pool.client.execute(request).await?.text().await?;
         pool.handle_list_response(body)?;
@@ -549,10 +566,11 @@ impl DataPool for S3Pool {
     }
 
     async fn remove(&self, desc: S3Object) -> Result<(), Error> {
-        let mut request = Request::new(Method::DELETE, Url::parse(&self.endpoint(desc))?);
+        let (endpoint, virturalhost) = self.endpoint_and_virturalhost(desc);
+        let mut request = Request::new(Method::DELETE, Url::parse(&endpoint)?);
 
         let now = Utc::now();
-        self.init_headers(request.headers_mut(), &now);
+        self.init_headers(request.headers_mut(), &now, virturalhost);
         self.authorizer.authorize(&mut request, &now);
 
         let _r = self.client.execute(request).await?;
@@ -569,10 +587,11 @@ impl DataPool for S3Pool {
     }
 
     async fn fetch_meta(&self, desc: &mut S3Object) -> Result<(), Error> {
-        let mut request = self.client.head(&self.endpoint(desc.clone())).build()?;
+        let (endpoint, virturalhost) = self.endpoint_and_virturalhost(desc.clone());
+        let mut request = self.client.head(&endpoint).build()?;
 
         let now = Utc::now();
-        self.init_headers(request.headers_mut(), &now);
+        self.init_headers(request.headers_mut(), &now, virturalhost);
         self.authorizer.authorize(&mut request, &now);
 
         let r = self.client.execute(request).await?;
