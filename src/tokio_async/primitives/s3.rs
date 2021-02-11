@@ -402,7 +402,7 @@ impl S3Pool {
             let headers = request.headers_mut();
             headers.insert(
                 header::RANGE,
-                HeaderValue::from_str(&format!("bytes={}-{}", start, end)).unwrap(),
+                HeaderValue::from_str(&format!("bytes={}-{}", start, end - 1)).unwrap(),
             );
 
             let now = Utc::now();
