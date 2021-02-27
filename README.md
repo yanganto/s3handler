@@ -1,13 +1,13 @@
-S3handler
----
-[![Build Status](https://travis-ci.com/yanganto/s3handler.svg?branch=master)](https://travis-ci.com/yanganto/s3handler)
+# S3handler
+[![Lint Code Base](https://github.com/yanganto/s3handler/actions/workflows/linter.yml/badge.svg)](https://github.com/yanganto/s3handler/actions/workflows/linter.yml)
+[![Build & Test](https://github.com/yanganto/s3handler/actions/workflows/test.yml/badge.svg)](https://github.com/yanganto/s3handler/actions/workflows/test.yml)
 
 
 A s3 handler library for [s3rs](https://github.com/yanganto/s3rs) and [nu-shell s3 plugin](https://github.com/nushell/nushell/tree/main/crates/nu_plugin_s3)
 Here is the [document](https://docs.rs/s3handler/).
 
 
-### Blocking API is ready
+## Blocking API is ready
 
 use s3handler = { features = ["blocking"] }
 
@@ -25,7 +25,7 @@ let mut handler = s3handler::Handler::from(&config);
 let _ = handler.la();
 ```
 
-### Async API
+## Async API
 Basic CRUD is implemented, other advance features are under developing.
 use s3handler = { features = ["tokio"] }
 
