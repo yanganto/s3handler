@@ -24,4 +24,5 @@ jobs:
           DEFAULT_BRANCH: master
           VALIDATE_RUST_2015: false
           VALIDATE_RUST_2018: true
+          VALIDATE_MARKDOWN: false
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
