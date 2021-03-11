@@ -21,6 +21,7 @@ pub struct UploadRequestPool {
     total_jobs: usize,
 }
 
+#[allow(clippy::needless_lifetimes)]
 fn acquire<'a, T>(s: &'a Arc<Mutex<T>>) -> MutexGuard<'a, T>
 where
     T: Debug,
@@ -34,6 +35,7 @@ where
     l.expect("lock acuired")
 }
 
+#[allow(clippy::too_many_arguments)]
 impl UploadRequestPool {
     pub fn new(
         auth_type: AuthType,
@@ -109,21 +111,22 @@ impl UploadRequestPool {
                         &mut Vec::new(),
                         &p.payload,
                     ) {
-                        Ok(r) => {
+                        Ok(result) => {
                             let mut send_result =
-                                result_send_back_ch.send(Ok((p.part_number.clone(), r.2.clone())));
+                                result_send_back_ch.send(Ok((p.part_number, result.2.clone())));
                             while send_result.is_err() {
                                 info!("send back result error: {:?}", send_result);
                                 thread::sleep(time::Duration::from_millis(1000));
-                                send_result = result_send_back_ch
-                                    .send(Ok((p.part_number.clone(), r.2.clone())));
+                                send_result =
+                                    result_send_back_ch.send(Ok((p.part_number, result.2.clone())));
                             }
                             info!("Part {} uploaded", p.part_number);
                         }
-                        Err(e) => {
-                            info!("Error on uploading Part {}: {}", p.part_number, e);
+                        Err(err) => {
+                            info!("Error on uploading Part {}: {}", p.part_number, err);
                             let rs = acquire(&a_ch_result_s2);
-                            rs.send(Err(e)).expect("channel is full to handle messages");
+                            rs.send(Err(err))
+                                .expect("channel is full to handle messages");
                             drop(rs);
                         }
                     };
@@ -174,7 +177,7 @@ impl UploadRequestPool {
             info!("{} parts uploaded", results.len());
             if results.len() == self.total_jobs {
                 self.close();
-                let mut content = format!("<CompleteMultipartUpload>");
+                let mut content = "<CompleteMultipartUpload>".to_string();
                 for res in results {
                     debug!("{:?}", res);
                     let r = res?;
@@ -189,7 +192,7 @@ impl UploadRequestPool {
                         part, etag
                     ));
                 }
-                content.push_str(&format!("</CompleteMultipartUpload>"));
+                content.push_str(&"</CompleteMultipartUpload>".to_string());
                 return Ok(content);
             }
         }

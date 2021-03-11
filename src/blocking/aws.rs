@@ -5,9 +5,7 @@ use chrono::prelude::*;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 use hmac::{Hmac, Mac};
-use hmacsha1;
 use log::{debug, error};
-use md5;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::{blocking::Client, header, StatusCode};
@@ -40,7 +38,7 @@ impl S3Client for AWS2Client<'_> {
         uri: &str,
         query_strings: &mut Vec<(&str, &str)>,
         headers: &mut Vec<(&str, &str)>,
-        payload: &Vec<u8>,
+        payload: &[u8],
     ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), Error> {
         let url = if self.tls {
             format!(
@@ -65,7 +63,7 @@ impl S3Client for AWS2Client<'_> {
         let mut signed_headers = vec![("date", time_str.as_str())];
 
         let request_headers_name: Vec<String> =
-            headers.into_iter().map(|x| x.0.to_string()).collect();
+            headers.iter_mut().map(|x| x.0.to_string()).collect();
 
         request_headers.insert("date", time_str.clone().parse().unwrap());
 
@@ -118,10 +116,10 @@ impl S3Client for AWS2Client<'_> {
             }
         }
         action
-            .body((*payload).clone())
+            .body(payload.to_vec())
             .send()
             .map_err(|e| Error::ReqwestError(format!("{:?}", e)))
-            .and_then(|mut res| Ok(res.handle_response()))
+            .map(|mut res| res.handle_response())
     }
     fn redirect_parser(&self, _body: Vec<u8>, _format: Format) -> Result<String, Error> {
         // TODO: implement redirect for aws2
@@ -143,7 +141,7 @@ impl S3Client for AWS4Client<'_> {
         uri: &str,
         query_strings: &mut Vec<(&str, &str)>,
         headers: &mut Vec<(&str, &str)>,
-        payload: &Vec<u8>,
+        payload: &[u8],
     ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), Error> {
         let url = if self.tls {
             format!(
@@ -163,13 +161,13 @@ impl S3Client for AWS4Client<'_> {
         let utc: DateTime<Utc> = Utc::now();
         let mut request_headers = header::HeaderMap::new();
         let time_str = utc.format("%Y%m%dT%H%M%SZ").to_string();
-        let payload_hash = hash_payload(&payload);
+        let payload_hash = hash_payload(payload);
 
-        request_headers.insert("x-amz-date", time_str.clone().parse().unwrap());
+        request_headers.insert("x-amz-date", time_str.parse().unwrap());
         request_headers.insert("x-amz-content-sha256", payload_hash.parse().unwrap());
 
         let request_headers_name: Vec<String> =
-            headers.into_iter().map(|x| x.0.to_string()).collect();
+            headers.iter_mut().map(|x| x.0.to_string()).collect();
 
         let mut signed_headers = vec![];
         if request_headers_name.contains(&"content-type".to_string()) {
@@ -205,7 +203,7 @@ impl S3Client for AWS4Client<'_> {
                 uri,
                 query_strings,
                 &mut signed_headers,
-                &payload,
+                payload,
                 utc.format("%Y%m%dT%H%M%SZ").to_string(),
                 &self.region,
                 false,
@@ -256,10 +254,10 @@ impl S3Client for AWS4Client<'_> {
             }
         }
         action
-            .body((*payload).clone())
+            .body(payload.to_vec())
             .send()
             .map_err(|e| Error::ReqwestError(format!("{:?}", e)))
-            .and_then(|mut res| Ok(res.handle_response()))
+            .map(|mut res| res.handle_response())
     }
     fn redirect_parser(&self, body: Vec<u8>, _format: Format) -> Result<String, Error> {
         // TODO: hanldle JSON for ceph
@@ -363,7 +361,7 @@ pub fn sign_headers(headers: &mut Vec<(&str, &str)>) -> String {
 }
 
 //HashedPayload = Lowercase(HexEncode(Hash(requestPayload)))
-pub fn hash_payload(payload: &Vec<u8>) -> String {
+pub fn hash_payload(payload: &[u8]) -> String {
     let mut sha = Sha256::new();
     sha.input(payload);
     debug!(
@@ -379,20 +377,20 @@ fn aws_v4_canonical_request(
     uri: &str,
     query_strings: &mut Vec<(&str, &str)>,
     headers: &mut Vec<(&str, &str)>,
-    payload: &Vec<u8>,
+    payload: &[u8],
 ) -> String {
     let mut input = String::new();
     input.push_str(http_method);
-    input.push_str("\n");
+    input.push('\n');
     input.push_str(uri);
-    input.push_str("\n");
+    input.push('\n');
     input.push_str(canonical_query_string(query_strings).as_str());
-    input.push_str("\n");
+    input.push('\n');
     input.push_str(canonical_headers(headers).as_str());
-    input.push_str("\n");
+    input.push('\n');
     input.push_str(sign_headers(headers).as_str());
-    input.push_str("\n");
-    input.push_str(hash_payload(payload).as_str());
+    input.push('\n');
+    input.push_str(hash_payload(&payload.to_vec()).as_str());
 
     debug!("canonical request:\n{}", input);
 
@@ -402,19 +400,20 @@ fn aws_v4_canonical_request(
     sha.result_str()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn aws_v4_get_string_to_signed(
     http_method: &str,
     uri: &str,
     query_strings: &mut Vec<(&str, &str)>,
     headers: &mut Vec<(&str, &str)>,
-    payload: &Vec<u8>,
+    payload: &[u8],
     time_str: String,
     region: &str,
     iam: bool,
 ) -> String {
     let mut string_to_signed = String::from_str("AWS4-HMAC-SHA256\n").unwrap();
     string_to_signed.push_str(&time_str);
-    string_to_signed.push_str("\n");
+    string_to_signed.push('\n');
     let endpoint_type = match iam {
         true => "iam",
         false => "s3",
@@ -427,12 +426,13 @@ pub fn aws_v4_get_string_to_signed(
             endpoint_type
         ));
     }
-    string_to_signed.push_str("\n");
+    string_to_signed.push('\n');
     string_to_signed.push_str(
-        aws_v4_canonical_request(http_method, uri, query_strings, headers, payload).as_str(),
+        aws_v4_canonical_request(http_method, uri, query_strings, headers, &payload.to_vec())
+            .as_str(),
     );
     debug!("string_to_signed:\n{}", string_to_signed);
-    return string_to_signed;
+    string_to_signed
 }
 
 // HMAC(HMAC(HMAC(HMAC("AWS4" + kSecret,"20150830"),"us-east-1"),"iam"),"aws4_request")
@@ -499,11 +499,11 @@ pub fn aws_s3_v2_get_string_to_signed(
     http_method: &str,
     uri: &str,
     headers: &mut Vec<(&str, &str)>,
-    content: &Vec<u8>,
+    content: &[u8],
 ) -> String {
     let mut string_to_signed = String::from_str(http_method).unwrap();
     string_to_signed.push('\n');
-    if content.len() > 0 {
+    if !content.is_empty() {
         string_to_signed.push_str(&format!("{:x}", md5::compute(content)));
     }
     string_to_signed.push('\n');
@@ -536,7 +536,7 @@ pub fn aws_s3_v2_get_string_to_signed(
     string_to_signed.push_str(&canonical_amz_headers(headers));
     string_to_signed.push_str(uri);
     debug!("string to signed:\n{}", string_to_signed);
-    return string_to_signed;
+    string_to_signed
 }
 
 //  NOTE: This is V2 signature but not for S3 REST, Im not sure where to use

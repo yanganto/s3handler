@@ -27,7 +27,7 @@ pub trait DataPool: Send + Sync + Debug {
     fn check_scheme(&self, _scheme: &str) -> Result<(), Error> {
         Err(Error::SchemeError())
     }
-    fn as_base_from(self, resource_location: &str) -> Result<Canal, Error>
+    fn base_from(self, resource_location: &str) -> Result<Canal, Error>
     where
         Self: Sized + 'static,
     {
@@ -42,7 +42,7 @@ pub trait DataPool: Send + Sync + Debug {
             }),
         }
     }
-    fn as_target_to(self, resource_location: &str) -> Result<Canal, Error>
+    fn target_to(self, resource_location: &str) -> Result<Canal, Error>
     where
         Self: Sized + 'static,
     {
@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn test_canal_connect() {
         let resource = FilePool::default();
-        let folder = resource.as_base_from("/path/to/a/folder").unwrap();
+        let folder = resource.base_from("/path/to/a/folder").unwrap();
         assert!(!folder.is_connect());
         let canal = folder.toward("/path/to/another/folder").unwrap();
         assert!(canal.is_connect());

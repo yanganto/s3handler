@@ -358,7 +358,7 @@ impl S3Pool {
         desc: S3Object,
         multipart_id: &str,
     ) -> Result<Response, Error> {
-        let mut content = format!("<CompleteMultipartUpload>");
+        let mut content = "<CompleteMultipartUpload>".to_string();
         for (idx, res) in reqs.into_iter().enumerate() {
             let r = res?;
             let etag = r.headers()[reqwest::header::ETAG]
@@ -371,7 +371,7 @@ impl S3Pool {
                 etag
             ));
         }
-        content.push_str(&format!("</CompleteMultipartUpload>"));
+        content.push_str(&"</CompleteMultipartUpload>".to_string());
         let (endpoint, virturalhost) = self.endpoint_and_virturalhost(desc);
         let url = format!("{}?uploadId={}", endpoint, multipart_id);
         let mut request = self.client.post(&url).body(content.into_bytes()).build()?;
@@ -402,7 +402,7 @@ impl S3Pool {
             let headers = request.headers_mut();
             headers.insert(
                 header::RANGE,
-                HeaderValue::from_str(&format!("bytes={}-{}", start, end)).unwrap(),
+                HeaderValue::from_str(&format!("bytes={}-{}", start, end - 1)).unwrap(),
             );
 
             let now = Utc::now();
@@ -445,7 +445,7 @@ impl From<Handler<'_>> for S3Pool {
             AuthType::AWS4 => Box::new(V4Authorizer::new(
                 access_key.into(),
                 secret_key.into(),
-                region.unwrap_or(DEFAULT_REGION.to_string()),
+                region.unwrap_or_else(|| DEFAULT_REGION.to_string()),
             )),
             AuthType::AWS2 => Box::new(V2Authorizer::new(access_key.into(), secret_key.into())),
         };
@@ -480,7 +480,7 @@ impl From<&Handler<'_>> for S3Pool {
             AuthType::AWS4 => Box::new(V4Authorizer::new(
                 access_key.to_string(),
                 secret_key.to_string(),
-                region.clone().unwrap_or(DEFAULT_REGION.to_string()),
+                region.clone().unwrap_or_else(|| DEFAULT_REGION.to_string()),
             )),
             AuthType::AWS2 => Box::new(V2Authorizer::new(
                 access_key.to_string(),
@@ -900,7 +900,7 @@ impl V4Signature for Request {
             &s[..8].to_string()
         };
 
-        let mut key: String = auth_str.split("-").next().unwrap_or_default().to_string();
+        let mut key: String = auth_str.split('-').next().unwrap_or_default().to_string();
         key.push_str(sign_key);
 
         let mut mac = Hmac::<sha2_256>::new(key.as_str().as_bytes());

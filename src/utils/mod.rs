@@ -4,7 +4,7 @@ use url::Url;
 
 use crate::error::Error;
 
-pub const DEFAULT_REGION: &'static str = "us-east-1";
+pub const DEFAULT_REGION: &str = "us-east-1";
 
 /// # Flexible S3 format parser
 /// - bucket - the objeck belonge to which
@@ -45,7 +45,7 @@ impl From<&str> for S3Object {
     fn from(s3_path: &str) -> Self {
         if let Ok(url_parser) = Url::parse(s3_path) {
             let bucket = match url_parser.host_str() {
-                Some(h) if h != "" => Some(h.to_string()),
+                Some(h) if !h.is_empty() => Some(h.to_string()),
                 _ => None,
             };
             match url_parser.path() {
@@ -81,7 +81,7 @@ impl From<S3Object> for String {
                 Some(k) => format!("s3://{}{}", b, k),
                 None => format!("s3://{}", b),
             },
-            None => format!("s3://"),
+            None => "s3://".to_string(),
         }
     }
 }
@@ -129,7 +129,7 @@ impl S3Convert for S3Object {
         let re = Regex::new(r#"/?(?P<bucket>[A-Za-z0-9\-\._]+)(?P<object>[A-Za-z0-9\-\._/]*)\s*"#)
             .unwrap();
         let caps = re.captures(uri).expect("S3 object uri format error.");
-        if &caps["object"] == "" || &caps["object"] == "/" {
+        if caps["object"].is_empty() || &caps["object"] == "/" {
             S3Object {
                 bucket: Some(caps["bucket"].to_string()),
                 key: None,
@@ -242,7 +242,7 @@ pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
                     Some(mtime.clone()),
                     Some(etag[1..etag.len() - 1].to_string()),
                     Some(storage_class.clone()),
-                    Some(size.clone()),
+                    Some(size),
                 )),
                 _ => {}
             },
@@ -308,14 +308,12 @@ pub fn upload_id_xml_parser(res: &str) -> Result<String, Error> {
                 }
             }
             Ok(Event::Eof) => break,
-            Err(e) => {
-                return Err(Error::XMLParseError(e).into());
-            }
+            Err(e) => return Err(Error::XMLParseError(e)),
             _ => (),
         }
         buf.clear();
     }
-    return Err(Error::FieldNotFound("upload_id"));
+    Err(Error::FieldNotFound("upload_id"))
 }
 
 #[cfg(test)]

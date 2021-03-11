@@ -19,6 +19,7 @@ pub struct DownloadRequestPool {
     data: Vec<u8>,
 }
 
+#[allow(clippy::needless_lifetimes)]
 fn acquire<'a, T>(s: &'a Arc<Mutex<T>>) -> MutexGuard<'a, T>
 where
     T: Debug,
@@ -32,6 +33,7 @@ where
     l.expect("lock acuired")
 }
 
+#[allow(clippy::too_many_arguments)]
 impl DownloadRequestPool {
     pub fn new(
         auth_type: AuthType,
@@ -103,30 +105,31 @@ impl DownloadRequestPool {
                         &mut vec![("range", &format!("bytes={}-{}", p.0, p.1 - 1))],
                         &Vec::new(),
                     ) {
-                        Ok(r) => {
-                            if r.1.len() == p.1 - p.0 {
+                        Ok(result) => {
+                            if result.1.len() == p.1 - p.0 {
                                 let mut send_result =
-                                    result_send_back_ch.send(Ok(((*p).clone(), r.1.clone())));
+                                    result_send_back_ch.send(Ok(((*p).clone(), result.1.clone())));
                                 while send_result.is_err() {
                                     info!("send back result error: {:?}", send_result);
                                     thread::sleep(time::Duration::from_millis(1000));
-                                    send_result =
-                                        result_send_back_ch.send(Ok(((*p).clone(), r.1.clone())));
+                                    send_result = result_send_back_ch
+                                        .send(Ok(((*p).clone(), result.1.clone())));
                                 }
                             } else {
                                 error!(
                                     "Range ({}, {}) download size not correct {}",
                                     p.0,
                                     p.1,
-                                    r.1.len()
+                                    result.1.len()
                                 );
                             }
                             info!("Range ({}, {}) download executed", p.0, p.1);
                         }
-                        Err(e) => {
-                            info!("Error on downloading Range ({}, {}): {}", p.0, p.1, e);
+                        Err(err) => {
+                            info!("Error on downloading Range ({}, {}): {}", p.0, p.1, err);
                             let rs = acquire(&a_ch_result_s2);
-                            rs.send(Err(e)).expect("channel is full to handle messages");
+                            rs.send(Err(err))
+                                .expect("channel is full to handle messages");
                             drop(rs);
                         }
                     };

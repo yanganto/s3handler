@@ -29,22 +29,20 @@ use upload_pool::{MultiUploadParameters, UploadRequestPool};
 use crate::utils::{
     s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object, DEFAULT_REGION,
 };
-use failure;
 use log::{debug, error, info};
 use mime_guess::from_path;
 use quick_xml::{events::Event, Reader};
 use regex::Regex;
 use reqwest::{blocking::Response, StatusCode};
 use serde_derive::Deserialize;
-use serde_json;
 
 pub mod aws;
 mod download_pool;
 mod upload_pool;
 
-static RESPONSE_CONTENT_FORMAT: &'static str =
+static RESPONSE_CONTENT_FORMAT: &str =
     r#""Contents":\["([^"]+?)","([^"]+?)","\\"([^"]+?)\\"",([^"]+?),"([^"]+?)"(.*?)\]"#;
-static RESPONSE_MARKER_FORMAT: &'static str = r#""NextMarker":"([^"]+?)","#;
+static RESPONSE_MARKER_FORMAT: &str = r#""NextMarker":"([^"]+?)","#;
 static DEFAULT_PREPART_SIZE: u64 = 5242880;
 
 /// # The struct for credential config for each S3 cluster
@@ -111,7 +109,7 @@ pub(crate) trait S3Client {
         query_strings: &mut Vec<(&str, &str)>,
         headers: &mut Vec<(&str, &str)>,
 
-        payload: &Vec<u8>,
+        payload: &[u8],
     ) -> Result<(StatusCode, Vec<u8>, reqwest::header::HeaderMap), Error>;
 
     fn redirect_parser(&self, body: Vec<u8>, format: Format) -> Result<String, Error>;
@@ -197,14 +195,13 @@ impl Handler<'_> {
         &mut self,
         method: &str,
         s3_object: &S3Object,
-        qs: &Vec<(&str, &str)>,
+        qs: &[(&str, &str)],
         headers: &mut Vec<(&str, &str)>,
-        payload: &Vec<u8>,
+        payload: &[u8],
     ) -> Result<(Vec<u8>, reqwest::header::HeaderMap), Error> {
         let mut query_strings = vec![];
-        match self.format {
-            Format::JSON => query_strings.push(("format", "json")),
-            _ => {}
+        if let Format::JSON = self.format {
+            query_strings.push(("format", "json"));
         }
         query_strings.extend(qs.iter().cloned());
 
@@ -260,13 +257,10 @@ impl Handler<'_> {
         let mut output = "".to_string();
         loop {
             match reader.read_event(&mut buf) {
-                Ok(Event::Start(ref e)) => match e.name() {
-                    b"NextMarker" => in_tag = true,
-                    _ => {}
-                },
-                Ok(Event::End(ref e)) => match e.name() {
-                    _ => {}
-                },
+                Ok(Event::Start(ref e)) if e.name() == b"NextMarker" => {
+                    in_tag = true;
+                }
+                Ok(Event::End(ref _e)) => {}
                 Ok(Event::Text(e)) => {
                     if in_tag {
                         output = e.unescape_and_decode(&reader).unwrap();
@@ -299,13 +293,13 @@ impl Handler<'_> {
         match self.format {
             Format::JSON => {
                 let result: serde_json::Value = serde_json::from_slice(&res).unwrap();
-                result[1].as_array().map(|bucket_list| {
+                if let Some(bucket_list) = result[1].as_array() {
                     buckets.extend(
                         bucket_list
                             .iter()
                             .map(|b| b["Name"].as_str().unwrap().to_string()),
                     )
-                });
+                };
             }
             Format::XML => {
                 buckets.extend(
@@ -323,7 +317,7 @@ impl Handler<'_> {
                     .request(
                         "GET",
                         &s3_object,
-                        &vec![("marker", &next_marker.clone().unwrap())],
+                        &[("marker", &next_marker.clone().unwrap())],
                         &mut Vec::new(),
                         &Vec::new(),
                     )?
@@ -333,7 +327,7 @@ impl Handler<'_> {
                     Format::JSON => {
                         next_marker = match next_marker_re
                             .captures_iter(std::str::from_utf8(body).unwrap_or(""))
-                            .nth(0)
+                            .next()
                         {
                             Some(c) => Some(c[1].to_string()),
                             None => None,
@@ -383,10 +377,11 @@ impl Handler<'_> {
                             .request(
                                 "GET",
                                 &s3_bucket,
-                                &vec![
+                                &[
                                     (
                                         "prefix",
-                                        &s3_object.key.clone().unwrap_or("/".to_string())[1..],
+                                        &s3_object.key.clone().unwrap_or_else(|| "/".to_string())
+                                            [1..],
                                     ),
                                     ("marker", &next_marker.clone().unwrap()),
                                 ],
@@ -399,7 +394,7 @@ impl Handler<'_> {
                     .to_string();
                     match self.format {
                         Format::JSON => {
-                            next_marker = match next_marker_re.captures_iter(&res).nth(0) {
+                            next_marker = match next_marker_re.captures_iter(&res).next() {
                                 Some(c) => Some(c[1].to_string()),
                                 None => None,
                             };
@@ -430,7 +425,7 @@ impl Handler<'_> {
                     Format::JSON => {
                         let result: serde_json::Value =
                             serde_json::from_str(std::str::from_utf8(body).unwrap_or("")).unwrap();
-                        result[1].as_array().map(|bucket_list| {
+                        if let Some(bucket_list) = result[1].as_array() {
                             output.extend(bucket_list.iter().map(|b| {
                                 S3Convert::new(
                                     Some(b["Name"].as_str().unwrap().to_string()),
@@ -441,7 +436,7 @@ impl Handler<'_> {
                                     None,
                                 )
                             }))
-                        });
+                        };
                     }
                     Format::XML => {
                         output.extend(s3object_list_xml_parser(
@@ -468,7 +463,7 @@ impl Handler<'_> {
                 .request(
                     "POST",
                     &s3_object,
-                    &vec![("uploads", "")],
+                    &[("uploads", "")],
                     &mut headers.clone(),
                     &Vec::new(),
                 )?
@@ -505,9 +500,9 @@ impl Handler<'_> {
             self.secure,
             self.access_key.to_string(),
             self.secret_key.to_string(),
-            host.to_string(),
+            host,
             uri,
-            self.region.clone().unwrap_or("".to_string()),
+            self.region.clone().unwrap_or_else(|| "".to_string()),
             upload_id.clone(),
             worker_number,
         );
@@ -542,7 +537,7 @@ impl Handler<'_> {
         let _ = self.request(
             "POST",
             &s3_object,
-            &vec![("uploadId", upload_id.as_str())],
+            &[("uploadId", upload_id.as_str())],
             &mut headers.clone(),
             &content.into_bytes(),
         )?;
@@ -553,7 +548,7 @@ impl Handler<'_> {
     /// Upload a file to a S3 bucket
     pub fn put(&mut self, file: &str, dest: &str) -> Result<(), failure::Error> {
         // TODO: handle XCOPY
-        if file == "" || dest == "" {
+        if file.is_empty() || dest.is_empty() {
             return Err(Error::UserError("please specify the file and the destiney").into());
         }
 
@@ -653,7 +648,7 @@ impl Handler<'_> {
                 self.secret_key.to_string(),
                 host,
                 uri,
-                self.region.clone().unwrap_or("".to_string()),
+                self.region.clone().unwrap_or_else(|| "".to_string()),
                 size as usize,
                 worker_number,
             );
@@ -684,10 +679,10 @@ impl Handler<'_> {
             .request("GET", &s3_object, &Vec::new(), &mut Vec::new(), &Vec::new())
             .map(|r| {
                 (
-                    format!("{}", std::str::from_utf8(&r.0).unwrap_or("")),
+                    std::str::from_utf8(&r.0).unwrap_or("").to_string(),
                     r.1.get(reqwest::header::CONTENT_TYPE)
                         .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
-                        .and_then(|s| Some(s.to_string())),
+                        .map(|s| s.to_string()),
                 )
             })?;
         Ok((output, content_type))
@@ -770,25 +765,21 @@ impl Handler<'_> {
     }
 
     /// Put a tag on an object
-    pub fn add_tag(
-        &mut self,
-        target: &str,
-        tags: &Vec<(&str, &str)>,
-    ) -> Result<(), failure::Error> {
+    pub fn add_tag(&mut self, target: &str, tags: &[(&str, &str)]) -> Result<(), failure::Error> {
         debug!("target: {:?}", target);
         debug!("tags: {:?}", tags);
         let s3_object = S3Object::from(target);
         if s3_object.key.is_none() {
             return Err(Error::UserError("Please specific the object").into());
         }
-        let mut content = format!("<Tagging><TagSet>");
+        let mut content = "<Tagging><TagSet>".to_string();
         for tag in tags {
             content.push_str(&format!(
                 "<Tag><Key>{}</Key><Value>{}</Value></Tag>",
                 tag.0, tag.1
             ));
         }
-        content.push_str(&format!("</TagSet></Tagging>"));
+        content.push_str(&"</TagSet></Tagging>".to_string());
         debug!("payload: {:?}", content);
 
         let query_string = vec![("tagging", "")];
@@ -821,14 +812,10 @@ impl Handler<'_> {
     }
 
     /// Show the usage of a bucket (CEPH only)
-    pub fn usage(
-        &mut self,
-        target: &str,
-        options: &Vec<(&str, &str)>,
-    ) -> Result<(), failure::Error> {
+    pub fn usage(&mut self, target: &str, options: &[(&str, &str)]) -> Result<(), failure::Error> {
         let s3_admin_bucket_object = S3Convert::new_from_uri("/admin/buckets");
         let s3_object = S3Object::from(target);
-        let mut query_strings = options.clone();
+        let mut query_strings = options.to_owned();
         if s3_object.bucket.is_none() {
             return Err(Error::UserError("S3 format not correct.").into());
         };
@@ -847,7 +834,7 @@ impl Handler<'_> {
                 json = serde_json::from_str(std::str::from_utf8(&result.0).unwrap_or("")).unwrap();
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&json["usage"]).unwrap_or("".to_string())
+                    serde_json::to_string_pretty(&json["usage"]).unwrap_or_else(|_| "".to_string())
                 );
             }
             Format::XML => {
@@ -872,7 +859,7 @@ impl Handler<'_> {
                 for q_pair in raw_qs.split('&') {
                     match q_pair.find('=') {
                         Some(_) => query_strings.push((
-                            q_pair.split('=').nth(0).unwrap(),
+                            q_pair.split('=').next().unwrap(),
                             q_pair.split('=').nth(1).unwrap(),
                         )),
                         None => query_strings.push((&q_pair, "")),
@@ -999,7 +986,7 @@ impl<'a> From<&'a CredentialConfig> for Handler<'a> {
         match credential
             .clone()
             .s3_type
-            .unwrap_or("".to_string())
+            .unwrap_or_else(|| "".to_string())
             .as_str()
         {
             "aws" => Handler {
@@ -1060,7 +1047,7 @@ impl<'a> From<&'a CredentialConfig> for Handler<'a> {
                     region: credential
                         .region
                         .clone()
-                        .unwrap_or(DEFAULT_REGION.to_string()),
+                        .unwrap_or_else(|| DEFAULT_REGION.to_string()),
                 }),
                 part_size: DEFAULT_PREPART_SIZE,
             },
