@@ -33,16 +33,11 @@ impl Default for FilePool {
 impl FilePool {
     pub fn new(path: &str) -> Result<Self, Error> {
         let mut fp = FilePool::default();
-        if path.starts_with("/") {
+        if path.starts_with('/') {
             fp.drive = "/".to_string();
-        } else {
-            match Url::parse(path) {
-                Ok(r) => {
-                    if ["s3", "S3"].contains(&r.scheme()) {
-                        return Err(Error::SchemeError());
-                    }
-                }
-                _ => {}
+        } else if let Ok(r) = Url::parse(path) {
+            if ["s3", "S3"].contains(&r.scheme()) {
+                return Err(Error::SchemeError());
             }
         }
         Ok(fp)
@@ -61,7 +56,7 @@ impl DataPool for FilePool {
             } else {
                 create_dir(Path::new(&b)).await
             };
-            r.or_else(|e| Err(e.into()))
+            r.map_err(|e| e.into())
         } else {
             Err(Error::ModifyEmptyBucketError())
         }
@@ -100,7 +95,7 @@ impl DataPool for FilePool {
                 read_dir(Path::new(&format!("{}{}{}", self.drive, b, k))).await?,
             )),
             Some(S3Object { bucket: None, .. }) | None => Ok(Box::new(
-                read_dir(Path::new(&format!("{}", self.drive))).await?,
+                read_dir(Path::new(&self.drive.to_string())).await?,
             )),
         }
     }
@@ -112,7 +107,7 @@ impl DataPool for FilePool {
             } else {
                 remove_dir_all(Path::new(&b)).await
             };
-            r.or_else(|e| Err(e.into()))
+            r.map_err(|e| e.into())
         } else {
             Err(Error::ModifyEmptyBucketError())
         }
