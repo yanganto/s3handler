@@ -2,3 +2,4 @@
 shell.nix
 target/*
 Cargo.lock
+.direnv/
