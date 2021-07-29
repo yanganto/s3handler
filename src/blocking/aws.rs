@@ -4,7 +4,7 @@ use base64::encode;
 use chrono::prelude::*;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, Mac, NewMac};
 use log::{debug, error};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -15,6 +15,8 @@ use url::form_urlencoded;
 
 use crate::blocking::{Format, ResponseHandler, S3Client};
 use crate::error::Error;
+
+type HmacSha256 = Hmac<sha2_256>;
 
 pub(crate) struct AWS2Client<'a> {
     pub tls: bool,
@@ -446,37 +448,38 @@ pub fn aws_v4_sign(
     let mut key = String::from("AWS4");
     key.push_str(secret_key);
 
-    let mut mac = Hmac::<sha2_256>::new(key.as_str().as_bytes());
-    mac.input(time_str.as_str().as_bytes());
-    let result = mac.result();
-    let code_bytes = result.code();
+    let mut mac =
+        HmacSha256::new_from_slice(key.as_str().as_bytes()).expect("HMAC can take key of any size");
+    mac.update(time_str.as_str().as_bytes());
+    let result = mac.finalize();
+    let code_bytes = result.into_bytes();
     debug!("date_k = {}", code_bytes.to_hex());
 
-    let mut mac1 = Hmac::<sha2_256>::new(code_bytes);
-    mac1.input(region.as_bytes());
-    let result1 = mac1.result();
-    let code_bytes1 = result1.code();
+    let mut mac1 = HmacSha256::new_from_slice(&code_bytes).expect("HMAC can take key of any size");
+    mac1.update(region.as_bytes());
+    let result1 = mac1.finalize();
+    let code_bytes1 = result1.into_bytes();
     debug!("region_k = {}", code_bytes1.to_hex());
 
-    let mut mac2 = Hmac::<sha2_256>::new(code_bytes1);
+    let mut mac2 = HmacSha256::new_from_slice(&code_bytes1).expect("HMAC can take key of any size");
     match iam {
-        true => mac2.input(b"iam"),
-        false => mac2.input(b"s3"),
+        true => mac2.update(b"iam"),
+        false => mac2.update(b"s3"),
     }
-    let result2 = mac2.result();
-    let code_bytes2 = result2.code();
+    let result2 = mac2.finalize();
+    let code_bytes2 = result2.into_bytes();
     debug!("service_k = {}", code_bytes2.to_hex());
 
-    let mut mac3 = Hmac::<sha2_256>::new(code_bytes2);
-    mac3.input(b"aws4_request");
-    let result3 = mac3.result();
-    let code_bytes3 = result3.code();
+    let mut mac3 = HmacSha256::new_from_slice(&code_bytes2).expect("HMAC can take key of any size");
+    mac3.update(b"aws4_request");
+    let result3 = mac3.finalize();
+    let code_bytes3 = result3.into_bytes();
     debug!("signing_k = {}", code_bytes3.to_hex());
 
-    let mut mac4 = Hmac::<sha2_256>::new(code_bytes3);
-    mac4.input(data.as_bytes());
-    let result4 = mac4.result();
-    let code_bytes4 = result4.code();
+    let mut mac4 = HmacSha256::new_from_slice(&code_bytes3).expect("HMAC can take key of any size");
+    mac4.update(data.as_bytes());
+    let result4 = mac4.finalize();
+    let code_bytes4 = result4.into_bytes();
     debug!("signature = {}", code_bytes4.to_hex());
 
     code_bytes4.to_hex()
@@ -562,11 +565,12 @@ pub fn aws_v2_get_string_to_signed(
 //  NOTE: This is V2 signature but not for S3 REST, Im not sure where to use
 #[cfg(test)]
 pub fn aws_v2_sign(secret_key: &str, data: &str) -> String {
-    let mut mac = Hmac::<sha2_256>::new(secret_key.as_bytes());
-    mac.input(data.as_bytes());
+    let mut mac =
+        HmacSha256::new_from_slice(secret_key.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(data.as_bytes());
 
-    let result = mac.result();
-    let code_bytes = result.code();
+    let result = mac.finalize();
+    let code_bytes = result.into_bytes();
 
     encode(code_bytes)
 }

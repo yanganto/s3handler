@@ -6,7 +6,7 @@ use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 use dyn_clone::DynClone;
 use futures::future::join_all;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, Mac, NewMac};
 use reqwest::{
     header::{self, HeaderMap, HeaderName, HeaderValue},
     Client, Method, Request, Response, Url,
@@ -903,30 +903,35 @@ impl V4Signature for Request {
         let mut key: String = auth_str.split('-').next().unwrap_or_default().to_string();
         key.push_str(sign_key);
 
-        let mut mac = Hmac::<sha2_256>::new(key.as_str().as_bytes());
-        mac.input(time_str.as_bytes());
-        let result = mac.result();
-        let code_bytes = result.code();
+        let mut mac = Hmac::<sha2_256>::new_from_slice(key.as_str().as_bytes())
+            .expect("HMAC can take key of any size");
+        mac.update(time_str.as_bytes());
+        let result = mac.finalize();
+        let code_bytes = result.into_bytes();
 
-        let mut mac1 = Hmac::<sha2_256>::new(code_bytes);
-        mac1.input(region.as_bytes());
-        let result1 = mac1.result();
-        let code_bytes1 = result1.code();
+        let mut mac1 =
+            Hmac::<sha2_256>::new_from_slice(&code_bytes).expect("HMAC can take key of any size");
+        mac1.update(region.as_bytes());
+        let result1 = mac1.finalize();
+        let code_bytes1 = result1.into_bytes();
 
-        let mut mac2 = Hmac::<sha2_256>::new(code_bytes1);
-        mac2.input(service.as_bytes());
-        let result2 = mac2.result();
-        let code_bytes2 = result2.code();
+        let mut mac2 =
+            Hmac::<sha2_256>::new_from_slice(&code_bytes1).expect("HMAC can take key of any size");
+        mac2.update(service.as_bytes());
+        let result2 = mac2.finalize();
+        let code_bytes2 = result2.into_bytes();
 
-        let mut mac3 = Hmac::<sha2_256>::new(code_bytes2);
-        mac3.input(action.as_bytes());
-        let result3 = mac3.result();
-        let code_bytes3 = result3.code();
+        let mut mac3 =
+            Hmac::<sha2_256>::new_from_slice(&code_bytes2).expect("HMAC can take key of any size");
+        mac3.update(action.as_bytes());
+        let result3 = mac3.finalize();
+        let code_bytes3 = result3.into_bytes();
 
-        let mut mac4 = Hmac::<sha2_256>::new(code_bytes3);
-        mac4.input(string_to_signed.as_bytes());
-        let result4 = mac4.result();
-        let code_bytes4 = result4.code();
+        let mut mac4 =
+            Hmac::<sha2_256>::new_from_slice(&code_bytes3).expect("HMAC can take key of any size");
+        mac4.update(string_to_signed.as_bytes());
+        let result4 = mac4.finalize();
+        let code_bytes4 = result4.into_bytes();
 
         SignatureInfo {
             signed_headers,
