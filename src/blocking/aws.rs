@@ -2,14 +2,13 @@ use std::str::FromStr;
 
 use base64::encode;
 use chrono::prelude::*;
-use crypto::digest::Digest;
-use crypto::sha2::Sha256;
 use hmac::{Hmac, Mac, NewMac};
 use log::{debug, error};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::{blocking::Client, header, StatusCode};
 use rustc_serialize::hex::ToHex;
+use sha2::Digest;
 use sha2::Sha256 as sha2_256;
 use url::form_urlencoded;
 
@@ -364,14 +363,15 @@ pub fn sign_headers(headers: &mut Vec<(&str, &str)>) -> String {
 
 //HashedPayload = Lowercase(HexEncode(Hash(requestPayload)))
 pub fn hash_payload(payload: &[u8]) -> String {
-    let mut sha = Sha256::new();
-    sha.input(payload);
+    let mut sha = sha2_256::new();
+    sha.update(payload);
+    let payload_hash = hex::encode(sha.finalize().as_slice());
     debug!(
         "payload (size: {}) request hash = {}",
         payload.len(),
-        sha.result_str()
+        &payload_hash
     );
-    sha.result_str()
+    payload_hash
 }
 
 fn aws_v4_canonical_request(
@@ -396,10 +396,11 @@ fn aws_v4_canonical_request(
 
     debug!("canonical request:\n{}", input);
 
-    let mut sha = Sha256::new();
-    sha.input_str(input.as_str());
-    debug!("canonical request hash = {}", sha.result_str());
-    sha.result_str()
+    let mut sha = sha2_256::new();
+    sha.update(input.as_str());
+    let payload_hash = hex::encode(sha.finalize().as_slice());
+    debug!("canonical request hash = {}", payload_hash);
+    payload_hash
 }
 
 #[allow(clippy::too_many_arguments)]

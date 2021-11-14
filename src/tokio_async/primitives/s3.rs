@@ -2,8 +2,6 @@ use async_trait::async_trait;
 use base64::encode;
 use bytes::{Bytes, BytesMut};
 use chrono::prelude::*;
-use crypto::digest::Digest;
-use crypto::sha2::Sha256;
 use dyn_clone::DynClone;
 use futures::future::join_all;
 use hmac::{Hmac, Mac, NewMac};
@@ -12,6 +10,7 @@ use reqwest::{
     Client, Method, Request, Response, Url,
 };
 use rustc_serialize::hex::ToHex;
+use sha2::Digest;
 use sha2::Sha256 as sha2_256;
 use std::fmt;
 use url::form_urlencoded;
@@ -847,20 +846,20 @@ impl V4Signature for Request {
     }
 
     fn payload_sha256(&mut self) -> String {
-        let mut sha = Sha256::new();
-        sha.input(
+        let mut sha = sha2_256::new();
+        sha.update(
             self.body()
                 .map(|b| b.as_bytes())
                 .unwrap_or_default()
                 .unwrap_or_default(),
         );
-        let paload_hash = sha.result_str();
+        let payload_hash = hex::encode(sha.finalize().as_slice());
         let headers = self.headers_mut();
         headers.insert(
             header::HeaderName::from_static("x-amz-content-sha256"),
-            HeaderValue::from_str(&paload_hash).unwrap(),
+            HeaderValue::from_str(&payload_hash).unwrap(),
         );
-        paload_hash
+        payload_hash
     }
 
     fn request_sha256(&mut self) -> RequestHashInfo {
@@ -871,11 +870,11 @@ impl V4Signature for Request {
             canonical_request,
         } = self.canonical_request_info(&paload_hash);
 
-        let mut sha = Sha256::new();
-        sha.input_str(canonical_request.as_str());
+        let mut sha = sha2_256::new();
+        sha.update(canonical_request.as_str());
         RequestHashInfo {
             signed_headers,
-            sha256: sha.result_str(),
+            sha256: hex::encode(sha.finalize().as_slice()),
         }
     }
 
