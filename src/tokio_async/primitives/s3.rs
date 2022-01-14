@@ -198,6 +198,7 @@ pub struct S3Pool {
     pub authorizer: Box<dyn Authorizer>,
 
     objects: Vec<S3Object>,
+    #[allow(dead_code)]
     start_after: Option<String>,
 }
 
