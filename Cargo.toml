@@ -1,8 +1,10 @@
 [package]
 name = "s3handler"
-version = "0.7.5"
+version = "0.7.6"
 authors = ["Antonio Yang <antonio.yang@siliconmotion.com.tw>"]
 edition = "2018"
+keywords = ["S3", "Amazon", "CEPH", "AWS"]
+categories = ["command-line-interface"]
 description = "An s3 handler for s3rs nu-shell-s3-plugin"
 license = "MIT"
 
@@ -31,6 +33,9 @@ bytes = { version= "1", optional = true }
 dyn-clone = "1.0"
 futures = "0.3.12"
 hex = "0.4.3"
+
+[dev-dependencies]
+test-with = "0.4.1"
 
 [features]
 default = [ "blocking", "tokio-async" ]

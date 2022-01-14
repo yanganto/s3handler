@@ -25,6 +25,7 @@ pub(crate) struct AWS2Client<'a> {
 
 pub(crate) struct AWS4Client<'a> {
     pub tls: bool,
+    #[allow(dead_code)]
     pub host: &'a str,
     pub access_key: &'a str,
     pub secret_key: &'a str,
