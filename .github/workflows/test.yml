@@ -18,4 +18,14 @@ jobs:
     - name: Build
       run: cargo build --verbose
     - name: Run tests
+      env:
+        ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+        SECRET_KEY: ${{ secrets.SECRET_KEY }}
+        REGION: ${{ secrets.REGION }}
+        S3_HOST: ${{ secrets.S3_HOST }}
+        BUCKET_NAME: ${{ secrets.BUCKET_NAME }}
+        OBJECT_NAME: ${{ secrets.OBJECT_NAME }}
+        BIG_OBJECT_NAME: ${{ secrets.BIG_OBJECT_NAME }}
+        PART_SIZE: ${{ secrets.PART_SIZE }}
+        EXPECT_CONTENT: ${{ secrets.EXPECT_CONTENT }}
       run: cargo test --verbose
