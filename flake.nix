@@ -22,6 +22,10 @@
             exit 1
           fi
         '';
+        publishScript = pkgs.writeShellScriptBin "crate-publish" ''
+          cargo login $1
+          cargo publish
+        '';
       in
       with pkgs;
       {
@@ -30,6 +34,7 @@
             openssl
             pkg-config
             rust
+            publishScript
             updateDependencyScript
           ];
         };
