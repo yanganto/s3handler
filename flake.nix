@@ -14,6 +14,18 @@
           inherit system overlays;
         };
         rust = pkgs.rust-bin.stable.latest.default;
+        updateDependencyScript = pkgs.writeShellScriptBin "update-dependency" ''
+          cargo install dependency-refresh
+          dr ./Cargo.toml
+          if [ -f "Cargo.toml.old" ]; then
+            rm Cargo.toml.old
+            exit 1
+          fi
+        '';
+        publishScript = pkgs.writeShellScriptBin "crate-publish" ''
+          cargo login $1
+          cargo publish
+        '';
       in
       with pkgs;
       {
@@ -22,6 +34,8 @@
             openssl
             pkg-config
             rust
+            publishScript
+            updateDependencyScript
           ];
         };
       }

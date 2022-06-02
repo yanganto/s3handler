@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 use chrono::prelude::*;
 use dyn_clone::DynClone;
 use futures::future::join_all;
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use reqwest::{
     header::{self, HeaderMap, HeaderName, HeaderValue},
     Client, Method, Request, Response, Url,

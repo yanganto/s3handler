@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use base64::encode;
 use chrono::prelude::*;
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use log::{debug, error};
 use quick_xml::events::Event;
 use quick_xml::Reader;
