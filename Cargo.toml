@@ -1,6 +1,6 @@
 [package]
 name = "s3handler"
-version = "0.7.6"
+version = "0.7.7"
 authors = ["Antonio Yang <antonio.yang@siliconmotion.com.tw>"]
 edition = "2018"
 keywords = ["S3", "Amazon", "CEPH", "AWS"]
