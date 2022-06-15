@@ -1,6 +1,6 @@
 [package]
 name = "s3handler"
-version = "0.7.7"
+version = "0.8.0"
 authors = ["Antonio Yang <antonio.yang@siliconmotion.com.tw>"]
 edition = "2018"
 keywords = ["S3", "Amazon", "CEPH", "AWS"]
@@ -23,9 +23,8 @@ log = "0.4"
 md5 = "0.7"
 serde_json = "1.0"
 regex = "1"
-quick-xml = "0.23.0"
-failure = "0.1"
-failure_derive ="0.1"
+quick-xml = "0.23"
+thiserror = "1.0"
 mime_guess = "2.0"
 async-trait = { version = "0.1", optional = true }
 tokio = { version = "1", optional = true }
