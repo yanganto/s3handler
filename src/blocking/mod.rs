@@ -281,7 +281,7 @@ impl Handler<'_> {
     }
 
     /// List all objects in a bucket
-    pub fn la(&mut self) -> Result<Vec<S3Object>, failure::Error> {
+    pub fn la(&mut self) -> Result<Vec<S3Object>, Box<dyn std::error::Error>> {
         let mut output = Vec::new();
         let content_re = Regex::new(RESPONSE_CONTENT_FORMAT).unwrap();
         let next_marker_re = Regex::new(RESPONSE_MARKER_FORMAT).unwrap();
@@ -361,7 +361,10 @@ impl Handler<'_> {
     }
 
     /// List all bucket of an account or List all object of an bucket
-    pub fn ls(&mut self, prefix: Option<&str>) -> Result<Vec<S3Object>, failure::Error> {
+    pub fn ls(
+        &mut self,
+        prefix: Option<&str>,
+    ) -> Result<Vec<S3Object>, Box<dyn std::error::Error>> {
         let mut output = Vec::new();
         let mut res: String;
         let s3_object = S3Object::from(prefix.unwrap_or("s3://"));
@@ -455,7 +458,7 @@ impl Handler<'_> {
         file_size: u64,
         s3_object: S3Object,
         headers: Vec<(&str, &str)>,
-    ) -> Result<(), failure::Error> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let total_part_number = (file_size / self.part_size + 1) as usize;
         debug!("upload file in {} parts", total_part_number);
         let res = std::str::from_utf8(
@@ -546,7 +549,7 @@ impl Handler<'_> {
     }
 
     /// Upload a file to a S3 bucket
-    pub fn put(&mut self, file: &str, dest: &str) -> Result<(), failure::Error> {
+    pub fn put(&mut self, file: &str, dest: &str) -> Result<(), Box<dyn std::error::Error>> {
         // TODO: handle XCOPY
         if file.is_empty() || dest.is_empty() {
             return Err(Error::UserError("please specify the file and the destiney").into());
@@ -601,7 +604,7 @@ impl Handler<'_> {
     }
 
     /// Download an object from S3 service
-    pub fn get(&mut self, src: &str, file: Option<&str>) -> Result<(), failure::Error> {
+    pub fn get(&mut self, src: &str, file: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         let s3_object = S3Object::from(src);
         if s3_object.key.is_none() {
             return Err(Error::UserError("Please specific the object").into());
@@ -670,7 +673,10 @@ impl Handler<'_> {
     }
 
     /// Show the content and the content type of an object
-    pub fn cat(&mut self, src: &str) -> Result<(String, Option<String>), failure::Error> {
+    pub fn cat(
+        &mut self,
+        src: &str,
+    ) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
         let s3_object = S3Object::from(src);
         if s3_object.key.is_none() {
             return Err(Error::UserError("Please specific the object").into());
@@ -695,7 +701,7 @@ impl Handler<'_> {
         &mut self,
         src: &str,
         headers: &mut Vec<(&str, &str)>,
-    ) -> Result<(), failure::Error> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         debug!("headers: {:?}", headers);
         let s3_object = S3Object::from(src);
         if s3_object.key.is_none() {
@@ -706,12 +712,12 @@ impl Handler<'_> {
     }
 
     /// Delete an object
-    pub fn del(&mut self, src: &str) -> Result<(), failure::Error> {
+    pub fn del(&mut self, src: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.del_with_flag(src, &mut Vec::new())
     }
 
     /// Make a new bucket
-    pub fn mb(&mut self, bucket: &str) -> Result<(), failure::Error> {
+    pub fn mb(&mut self, bucket: &str) -> Result<(), Box<dyn std::error::Error>> {
         let s3_object = S3Object::from(bucket);
         if s3_object.bucket.is_none() {
             return Err(Error::UserError("please specific the bucket name").into());
@@ -721,7 +727,7 @@ impl Handler<'_> {
     }
 
     /// Remove a bucket
-    pub fn rb(&mut self, bucket: &str) -> Result<(), failure::Error> {
+    pub fn rb(&mut self, bucket: &str) -> Result<(), Box<dyn std::error::Error>> {
         let s3_object = S3Object::from(bucket);
         if s3_object.bucket.is_none() {
             return Err(Error::UserError("please specific the bucket name").into());
@@ -737,7 +743,7 @@ impl Handler<'_> {
     }
 
     /// list all tags of an object
-    pub fn list_tag(&mut self, target: &str) -> Result<(), failure::Error> {
+    pub fn list_tag(&mut self, target: &str) -> Result<(), Box<dyn std::error::Error>> {
         let res: String;
         debug!("target: {:?}", target);
         let s3_object = S3Object::from(target);
@@ -765,7 +771,11 @@ impl Handler<'_> {
     }
 
     /// Put a tag on an object
-    pub fn add_tag(&mut self, target: &str, tags: &[(&str, &str)]) -> Result<(), failure::Error> {
+    pub fn add_tag(
+        &mut self,
+        target: &str,
+        tags: &[(&str, &str)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         debug!("target: {:?}", target);
         debug!("tags: {:?}", tags);
         let s3_object = S3Object::from(target);
@@ -794,7 +804,7 @@ impl Handler<'_> {
     }
 
     /// Remove aa tag from an object
-    pub fn del_tag(&mut self, target: &str) -> Result<(), failure::Error> {
+    pub fn del_tag(&mut self, target: &str) -> Result<(), Box<dyn std::error::Error>> {
         debug!("target: {:?}", target);
         let s3_object = S3Object::from(target);
         if s3_object.key.is_none() {
@@ -812,7 +822,11 @@ impl Handler<'_> {
     }
 
     /// Show the usage of a bucket (CEPH only)
-    pub fn usage(&mut self, target: &str, options: &[(&str, &str)]) -> Result<(), failure::Error> {
+    pub fn usage(
+        &mut self,
+        target: &str,
+        options: &[(&str, &str)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let s3_admin_bucket_object = S3Convert::new_from_uri("/admin/buckets");
         let s3_object = S3Object::from(target);
         let mut query_strings = options.to_owned();
@@ -848,7 +862,7 @@ impl Handler<'_> {
 
     /// Do a GET request for the specific URL
     /// This method is easily to show the configure of S3 not implemented
-    pub fn url_command(&mut self, url: &str) -> Result<(), failure::Error> {
+    pub fn url_command(&mut self, url: &str) -> Result<(), Box<dyn std::error::Error>> {
         let s3_object;
         let mut raw_qs = String::new();
         let mut query_strings = Vec::new();
