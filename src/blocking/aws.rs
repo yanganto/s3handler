@@ -7,7 +7,6 @@ use log::{debug, error};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::{blocking::Client, header, StatusCode};
-use rustc_serialize::hex::ToHex;
 use sha2::Digest;
 use sha2::Sha256 as sha2_256;
 use url::form_urlencoded;
@@ -455,13 +454,13 @@ pub fn aws_v4_sign(
     mac.update(time_str.as_str().as_bytes());
     let result = mac.finalize();
     let code_bytes = result.into_bytes();
-    debug!("date_k = {}", code_bytes.to_hex());
+    debug!("date_k = {:02x}", code_bytes);
 
     let mut mac1 = HmacSha256::new_from_slice(&code_bytes).expect("HMAC can take key of any size");
     mac1.update(region.as_bytes());
     let result1 = mac1.finalize();
     let code_bytes1 = result1.into_bytes();
-    debug!("region_k = {}", code_bytes1.to_hex());
+    debug!("region_k = {:02x}", code_bytes1);
 
     let mut mac2 = HmacSha256::new_from_slice(&code_bytes1).expect("HMAC can take key of any size");
     match iam {
@@ -470,21 +469,21 @@ pub fn aws_v4_sign(
     }
     let result2 = mac2.finalize();
     let code_bytes2 = result2.into_bytes();
-    debug!("service_k = {}", code_bytes2.to_hex());
+    debug!("service_k = {:02x}", code_bytes2);
 
     let mut mac3 = HmacSha256::new_from_slice(&code_bytes2).expect("HMAC can take key of any size");
     mac3.update(b"aws4_request");
     let result3 = mac3.finalize();
     let code_bytes3 = result3.into_bytes();
-    debug!("signing_k = {}", code_bytes3.to_hex());
+    debug!("signing_k = {:02x}", code_bytes3);
 
     let mut mac4 = HmacSha256::new_from_slice(&code_bytes3).expect("HMAC can take key of any size");
     mac4.update(data.as_bytes());
     let result4 = mac4.finalize();
     let code_bytes4 = result4.into_bytes();
-    debug!("signature = {}", code_bytes4.to_hex());
+    debug!("signature = {:02x}", code_bytes4);
 
-    code_bytes4.to_hex()
+    format!("{code_bytes4:02x}")
 }
 
 // AWS 2 for S3
