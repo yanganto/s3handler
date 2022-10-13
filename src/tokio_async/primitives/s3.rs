@@ -163,7 +163,7 @@ impl Authorizer for V4Authorizer {
             "{} Credential={}/{}/{}/{}/{}, SignedHeaders={}, Signature={}",
             self.auth_str,
             self.access_key,
-            now.format("%Y%m%d").to_string(),
+            now.format("%Y%m%d"),
             self.region,
             self.service,
             self.action,

@@ -62,14 +62,14 @@ impl S3Client for AWS2Client<'_> {
 
         // NOTE: ceph has bug using x-amz-date
         let mut signed_headers = vec![("date", time_str.as_str())];
-
-        let request_headers_name: Vec<String> =
-            headers.iter_mut().map(|x| x.0.to_string()).collect();
-
         request_headers.insert("date", time_str.clone().parse().unwrap());
 
         // Support AWS delete marker feature
-        if request_headers_name.contains(&"delete-marker".to_string()) {
+        if headers
+            .iter_mut()
+            .map(|x| x.0.to_string())
+            .any(|x| x == *"delete-marker")
+        {
             for h in headers {
                 if h.0 == "delete-marker" {
                     request_headers.insert("x-amz-delete-marker", h.1.parse().unwrap());
@@ -219,7 +219,7 @@ impl S3Client for AWS4Client<'_> {
         authorize_string.push('/');
         authorize_string.push_str(&format!(
             "{}/{}/s3/aws4_request, SignedHeaders={}, Signature={}",
-            utc.format("%Y%m%d").to_string(),
+            utc.format("%Y%m%d"),
             self.region,
             sign_headers(&mut signed_headers),
             signature
@@ -264,7 +264,7 @@ impl S3Client for AWS4Client<'_> {
         // TODO: hanldle JSON for ceph
         let result = std::str::from_utf8(&body).unwrap_or("");
         let mut endpoint = "".to_string();
-        let mut reader = Reader::from_str(&result);
+        let mut reader = Reader::from_str(result);
         let mut in_tag = false;
         let mut buf = Vec::new();
 
