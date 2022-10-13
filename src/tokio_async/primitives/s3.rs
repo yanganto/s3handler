@@ -9,7 +9,6 @@ use reqwest::{
     header::{self, HeaderMap, HeaderName, HeaderValue},
     Client, Method, Request, Response, Url,
 };
-use rustc_serialize::hex::ToHex;
 use sha2::Digest;
 use sha2::Sha256 as sha2_256;
 use std::fmt;
@@ -935,7 +934,7 @@ impl V4Signature for Request {
 
         SignatureInfo {
             signed_headers,
-            signature: code_bytes4.to_hex(),
+            signature: format!("{code_bytes4:02x}"),
         }
     }
 }
