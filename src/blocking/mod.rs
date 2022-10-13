@@ -220,7 +220,7 @@ impl Handler<'_> {
             &uri,
             &mut query_strings,
             headers,
-            &payload,
+            payload,
         )?;
         match status_code.is_redirection() {
             true => {
@@ -241,7 +241,7 @@ impl Handler<'_> {
                     &uri,
                     &mut query_strings,
                     headers,
-                    &payload,
+                    payload,
                 )?;
                 self.s3_client.update(origin_region.unwrap(), self.secure);
                 Ok((body, response_headers))
@@ -292,7 +292,7 @@ impl Handler<'_> {
         let mut buckets = Vec::new();
         match self.format {
             Format::JSON => {
-                let result: serde_json::Value = serde_json::from_slice(&res).unwrap();
+                let result: serde_json::Value = serde_json::from_slice(res).unwrap();
                 if let Some(bucket_list) = result[1].as_array() {
                     buckets.extend(
                         bucket_list
@@ -325,13 +325,10 @@ impl Handler<'_> {
 
                 match self.format {
                     Format::JSON => {
-                        next_marker = match next_marker_re
+                        next_marker = next_marker_re
                             .captures_iter(std::str::from_utf8(body).unwrap_or(""))
                             .next()
-                        {
-                            Some(c) => Some(c[1].to_string()),
-                            None => None,
-                        };
+                            .map(|c| c[1].to_string());
                         output.extend(
                             content_re
                                 .captures_iter(std::str::from_utf8(body).unwrap_or(""))
@@ -397,10 +394,10 @@ impl Handler<'_> {
                     .to_string();
                     match self.format {
                         Format::JSON => {
-                            next_marker = match next_marker_re.captures_iter(&res).next() {
-                                Some(c) => Some(c[1].to_string()),
-                                None => None,
-                            };
+                            next_marker_re
+                                .captures_iter(&res)
+                                .next()
+                                .map(|c| c[1].to_string());
                             output.extend(re.captures_iter(&res).map(|cap| {
                                 S3Convert::new(
                                     Some(b.to_string()),
@@ -876,7 +873,7 @@ impl Handler<'_> {
                             q_pair.split('=').next().unwrap(),
                             q_pair.split('=').nth(1).unwrap(),
                         )),
-                        None => query_strings.push((&q_pair, "")),
+                        None => query_strings.push((q_pair, "")),
                     }
                 }
             }

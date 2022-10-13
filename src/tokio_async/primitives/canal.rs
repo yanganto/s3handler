@@ -323,9 +323,9 @@ impl Canal {
                 .remove(upstream_object)
                 .await?)
         } else {
-            return Err(Error::ResourceUrlError(
+            Err(Error::ResourceUrlError(
                 "can not remove on an object withouput setup".to_string(),
-            ));
+            ))
         }
     }
 
@@ -338,9 +338,9 @@ impl Canal {
                 .remove(downstream_object)
                 .await?)
         } else {
-            return Err(Error::ResourceUrlError(
+            Err(Error::ResourceUrlError(
                 "can not remove on an object withouput setup".to_string(),
-            ));
+            ))
         }
     }
 
