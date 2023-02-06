@@ -24,9 +24,9 @@ use crate::utils::{
 
 type UTCTime = DateTime<Utc>;
 
-pub trait Authorizer: Send + Sync + DynClone + fmt::Debug {
+pub trait Signer: Send + Sync + DynClone + fmt::Debug {
     /// This method will setup the header and put the authorize string
-    fn authorize(&self, _request: &mut Request, _now: &UTCTime) {
+    fn sign(&self, _request: &mut Request, _now: &UTCTime) {
         unimplemented!()
     }
 
@@ -34,17 +34,18 @@ pub trait Authorizer: Send + Sync + DynClone + fmt::Debug {
     fn update_region(&mut self, _region: String) {}
 }
 
-dyn_clone::clone_trait_object!(Authorizer);
+dyn_clone::clone_trait_object!(Signer);
 
+/// A dummy signer if you do not want sign any request
 #[derive(Clone, Debug)]
-pub struct PublicAuthorizer {}
+pub struct DummySigner {}
 
-impl Authorizer for PublicAuthorizer {
-    fn authorize(&self, _requests: &mut Request, _now: &UTCTime) {}
+impl Signer for DummySigner {
+    fn sign(&self, _requests: &mut Request, _now: &UTCTime) {}
 }
 
 #[derive(Clone, Debug)]
-pub struct V2Authorizer {
+pub struct V2AuthSigner {
     pub access_key: String,
     pub secret_key: String,
     pub auth_str: String,
@@ -52,10 +53,10 @@ pub struct V2Authorizer {
 }
 
 #[allow(dead_code)]
-impl V2Authorizer {
-    /// new V2 Authorizer compatible with AWS and CEPH
+impl V2AuthSigner {
+    /// new V2 auth signer compatible with AWS and CEPH
     pub fn new(access_key: String, secret_key: String) -> Self {
-        V2Authorizer {
+        V2AuthSigner {
             access_key,
             secret_key,
             auth_str: "AWS".to_string(),
@@ -77,21 +78,21 @@ impl V2Authorizer {
     }
 }
 
-impl Authorizer for V2Authorizer {
-    fn authorize(&self, request: &mut Request, _now: &UTCTime) {
-        let authorize_string = format!(
+impl Signer for V2AuthSigner {
+    fn sign(&self, request: &mut Request, _now: &UTCTime) {
+        let auth_string = format!(
             "{} {}:{}",
             self.auth_str,
             self.access_key,
             <Request as V2Signature>::sign(request, &self.secret_key)
         );
         let headers = request.headers_mut();
-        headers.insert(header::AUTHORIZATION, authorize_string.parse().unwrap());
+        headers.insert(header::AUTHORIZATION, auth_string.parse().unwrap());
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct V4Authorizer {
+pub struct V4AuthSigner {
     pub access_key: String,
     pub secret_key: String,
     pub region: String,
@@ -102,10 +103,10 @@ pub struct V4Authorizer {
 }
 
 #[allow(dead_code)]
-impl V4Authorizer {
-    /// new V4 Authorizer for AWS and CEPH
+impl V4AuthSigner {
+    /// new V4 Auth signer for AWS and CEPH
     pub fn new(access_key: String, secret_key: String, region: String) -> Self {
-        V4Authorizer {
+        V4AuthSigner {
             access_key,
             secret_key,
             region,
@@ -145,8 +146,8 @@ impl V4Authorizer {
     }
 }
 
-impl Authorizer for V4Authorizer {
-    fn authorize(&self, request: &mut Request, now: &UTCTime) {
+impl Signer for V4AuthSigner {
+    fn sign(&self, request: &mut Request, now: &UTCTime) {
         let SignatureInfo {
             signed_headers,
             signature,
@@ -194,7 +195,8 @@ pub struct S3Pool {
 
     client: Client,
 
-    pub authorizer: Box<dyn Authorizer>,
+    /// The signer to adapt different protocol of data source
+    pub signer: Box<dyn Signer>,
 
     objects: Vec<S3Object>,
     #[allow(dead_code)]
@@ -228,7 +230,7 @@ impl S3Pool {
             secure: false,
             url_style: UrlStyle::PATH,
             client: Client::new(),
-            authorizer: Box::new(PublicAuthorizer {}),
+            signer: Box::new(DummySigner {}),
             part_size: None,
             objects: Vec::with_capacity(1000),
             start_after: None,
@@ -236,13 +238,13 @@ impl S3Pool {
     }
 
     pub fn aws_v2(mut self, access_key: String, secret_key: String) -> Self {
-        self.authorizer = Box::new(V2Authorizer::new(access_key, secret_key));
+        self.signer = Box::new(V2AuthSigner::new(access_key, secret_key));
         self.url_style = UrlStyle::PATH;
         self
     }
 
     pub fn aws_v4(mut self, access_key: String, secret_key: String, region: String) -> Self {
-        self.authorizer = Box::new(V4Authorizer::new(access_key, secret_key, region));
+        self.signer = Box::new(V4AuthSigner::new(access_key, secret_key, region));
         self.url_style = UrlStyle::HOST;
         self
     }
@@ -306,7 +308,7 @@ impl S3Pool {
 
         let now = Utc::now();
         self.init_headers(request.headers_mut(), &now, virturalhost);
-        self.authorizer.authorize(&mut request, &now);
+        self.signer.sign(&mut request, &now);
 
         let r = self.client.execute(request).await?;
 
@@ -344,7 +346,7 @@ impl S3Pool {
 
             let now = Utc::now();
             self.init_headers(request.headers_mut(), &now, virtural_host);
-            self.authorizer.authorize(&mut request, &now);
+            self.signer.sign(&mut request, &now);
             req_list.push(self.client.execute(request));
             start += part_size
         }
@@ -376,7 +378,7 @@ impl S3Pool {
         let mut request = self.client.post(&url).body(content.into_bytes()).build()?;
         let now = Utc::now();
         self.init_headers(request.headers_mut(), &now, virturalhost);
-        self.authorizer.authorize(&mut request, &now);
+        self.signer.sign(&mut request, &now);
         let r = self.client.execute(request).await?;
         Ok(r)
     }
@@ -406,7 +408,7 @@ impl S3Pool {
 
             let now = Utc::now();
             self.init_headers(headers, &now, virturalhost);
-            self.authorizer.authorize(&mut request, &now);
+            self.signer.sign(&mut request, &now);
             req_list.push(self.client.execute(request));
             start += part_size
         }
@@ -440,13 +442,13 @@ impl From<Handler<'_>> for S3Pool {
             ..
         } = handler;
 
-        let authorizer: Box<dyn Authorizer> = match auth_type {
-            AuthType::AWS4 => Box::new(V4Authorizer::new(
+        let signer: Box<dyn Signer> = match auth_type {
+            AuthType::AWS4 => Box::new(V4AuthSigner::new(
                 access_key.into(),
                 secret_key.into(),
                 region.unwrap_or_else(|| DEFAULT_REGION.to_string()),
             )),
-            AuthType::AWS2 => Box::new(V2Authorizer::new(access_key.into(), secret_key.into())),
+            AuthType::AWS2 => Box::new(V2AuthSigner::new(access_key.into(), secret_key.into())),
         };
 
         Self {
@@ -454,7 +456,7 @@ impl From<Handler<'_>> for S3Pool {
             secure,
             url_style,
             client: Client::new(),
-            authorizer,
+            signer,
             part_size: Some(5242880),
             objects: Vec::with_capacity(1000),
             start_after: None,
@@ -475,13 +477,13 @@ impl From<&Handler<'_>> for S3Pool {
             ..
         } = handler;
 
-        let authorizer: Box<dyn Authorizer> = match auth_type {
-            AuthType::AWS4 => Box::new(V4Authorizer::new(
+        let signer: Box<dyn Signer> = match auth_type {
+            AuthType::AWS4 => Box::new(V4AuthSigner::new(
                 access_key.to_string(),
                 secret_key.to_string(),
                 region.clone().unwrap_or_else(|| DEFAULT_REGION.to_string()),
             )),
-            AuthType::AWS2 => Box::new(V2Authorizer::new(
+            AuthType::AWS2 => Box::new(V2AuthSigner::new(
                 access_key.to_string(),
                 secret_key.to_string(),
             )),
@@ -492,7 +494,7 @@ impl From<&Handler<'_>> for S3Pool {
             secure,
             url_style: url_style.clone(),
             client: Client::new(),
-            authorizer,
+            signer,
             part_size: Some(5242880),
             objects: Vec::with_capacity(1000),
             start_after: None,
@@ -519,7 +521,7 @@ impl DataPool for S3Pool {
 
             let now = Utc::now();
             self.init_headers(request.headers_mut(), &now, virturalhost);
-            self.authorizer.authorize(&mut request, &now);
+            self.signer.sign(&mut request, &now);
             self.client.execute(request).await?
         };
         // TODO validate _r status code
@@ -543,7 +545,7 @@ impl DataPool for S3Pool {
 
             let now = Utc::now();
             self.init_headers(request.headers_mut(), &now, virturalhost);
-            self.authorizer.authorize(&mut request, &now);
+            self.signer.sign(&mut request, &now);
 
             let r = self.client.execute(request).await?;
             // TODO validate status code
@@ -558,7 +560,7 @@ impl DataPool for S3Pool {
 
         let now = Utc::now();
         pool.init_headers(request.headers_mut(), &now, virturalhost);
-        pool.authorizer.authorize(&mut request, &now);
+        pool.signer.sign(&mut request, &now);
         let body = pool.client.execute(request).await?.text().await?;
         pool.handle_list_response(body)?;
         Ok(Box::new(pool))
@@ -570,7 +572,7 @@ impl DataPool for S3Pool {
 
         let now = Utc::now();
         self.init_headers(request.headers_mut(), &now, virturalhost);
-        self.authorizer.authorize(&mut request, &now);
+        self.signer.sign(&mut request, &now);
 
         let _r = self.client.execute(request).await?;
         // TODO validate status code
@@ -591,7 +593,7 @@ impl DataPool for S3Pool {
 
         let now = Utc::now();
         self.init_headers(request.headers_mut(), &now, virturalhost);
-        self.authorizer.authorize(&mut request, &now);
+        self.signer.sign(&mut request, &now);
 
         let r = self.client.execute(request).await?;
         let headers = r.headers();
