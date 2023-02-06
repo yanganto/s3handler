@@ -6,7 +6,7 @@ use tokio::fs::{create_dir, read, read_dir, remove_dir_all, remove_file, write, 
 use url::Url;
 
 use crate::error::Error;
-use crate::tokio_async::traits::{DataPool, S3Folder};
+use crate::tokio_async::traits::{DataPool, Filter, S3Folder};
 use crate::utils::S3Object;
 
 #[async_trait]
@@ -78,7 +78,14 @@ impl DataPool for FilePool {
         Err(Error::PullEmptyObjectError())
     }
 
-    async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error> {
+    async fn list(
+        &self,
+        index: Option<S3Object>,
+        filter: &Option<Filter>,
+    ) -> Result<Box<dyn S3Folder>, Error> {
+        if filter.is_some() {
+            unimplemented!("filter for file system is not implemented")
+        }
         match index {
             Some(S3Object {
                 bucket: Some(b),

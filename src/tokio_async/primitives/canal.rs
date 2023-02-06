@@ -1,6 +1,6 @@
 use super::file::FilePool;
 use crate::error::Error;
-use crate::tokio_async::traits::{DataPool, S3Folder};
+use crate::tokio_async::traits::{DataPool, Filter, S3Folder};
 use crate::utils::S3Object;
 
 #[derive(Debug)]
@@ -16,6 +16,7 @@ pub struct Canal {
     pub down_pool: Option<Box<dyn DataPool>>,
     pub downstream_object: Option<S3Object>,
     pub(crate) default: PoolType,
+    pub filter: Option<Filter>,
     // TODO: feature: data transformer
     // it may do encrypt, or format transformation here
     // upstream_obj_lambda:
@@ -178,6 +179,11 @@ impl Canal {
         self._bucket(folder_name)
     }
 
+    pub fn prefix(mut self, prefix_str: &str) -> Self {
+        self.filter = Some(Filter::Prefix(prefix_str.into()));
+        self
+    }
+
     #[inline]
     pub fn _toward_object(&mut self, object_name: &str) {
         let mut o = self.downstream_object.take().unwrap_or_default();
@@ -294,6 +300,7 @@ impl Canal {
     }
 
     /// Pull the object from up pool to down pool.
+    /// If object not specified, it will pull all the objects from up_pool
     /// It will raise error if the canal is not will setup.
     pub async fn pull(self) -> Result<(), Error> {
         match (self.up_pool, self.down_pool) {
@@ -359,7 +366,7 @@ impl Canal {
         Ok(self
             .up_pool
             .expect("upstream pool should exist")
-            .list(self.upstream_object)
+            .list(self.upstream_object, &self.filter)
             .await?)
     }
 
@@ -368,7 +375,7 @@ impl Canal {
         Ok(self
             .down_pool
             .expect("downstream pool should exist")
-            .list(self.downstream_object)
+            .list(self.downstream_object, &self.filter)
             .await?)
     }
 

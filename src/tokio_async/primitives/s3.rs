@@ -17,7 +17,7 @@ use url::form_urlencoded;
 use super::canal::{Canal, PoolType};
 use crate::blocking::{AuthType, Handler};
 use crate::error::Error;
-use crate::tokio_async::traits::{DataPool, S3Folder};
+use crate::tokio_async::traits::{DataPool, Filter, S3Folder};
 use crate::utils::{
     s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object, UrlStyle, DEFAULT_REGION,
 };
@@ -211,6 +211,7 @@ impl S3Pool {
             upstream_object: Some(bucket_name.into()),
             downstream_object: None,
             default: PoolType::UpPool,
+            filter: None,
         }
     }
 
@@ -221,6 +222,7 @@ impl S3Pool {
             upstream_object: Some(s3_object),
             downstream_object: None,
             default: PoolType::UpPool,
+            filter: None,
         }
     }
 
@@ -553,10 +555,19 @@ impl DataPool for S3Pool {
         }
     }
 
-    async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error> {
+    async fn list(
+        &self,
+        index: Option<S3Object>,
+        filter: &Option<Filter>,
+    ) -> Result<Box<dyn S3Folder>, Error> {
         let mut pool = self.clone();
         let (endpoint, virturalhost) = self.endpoint_and_virturalhost(index.unwrap_or_default());
-        let mut request = Request::new(Method::GET, Url::parse(&endpoint)?);
+        let url = if let Some(Filter::Prefix(prefix)) = filter {
+            Url::parse_with_params(&endpoint, &[("prefix", prefix)])?
+        } else {
+            Url::parse(&endpoint)?
+        };
+        let mut request = Request::new(Method::GET, url);
 
         let now = Utc::now();
         pool.init_headers(request.headers_mut(), &now, virturalhost);
