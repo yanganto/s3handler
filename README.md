@@ -27,7 +27,8 @@ let _ = handler.la();
 
 ## Async API
 Basic CRUD is implemented, other advance features are under developing.
-use s3handler = { features = ["tokio"] }
+add this dependency to your cargo.toml
+`s3handler = { features = ["tokio-async"] }`
 
 Download a file with async api
 use s3handler = { features = ["tokio-async"] }
