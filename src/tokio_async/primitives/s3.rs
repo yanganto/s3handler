@@ -199,8 +199,8 @@ pub struct S3Pool {
     pub signer: Box<dyn Signer>,
 
     objects: Vec<S3Object>,
-    #[allow(dead_code)]
-    start_after: Option<String>,
+    filter: Option<Filter>,
+    is_truncated: bool,
 }
 
 impl S3Pool {
@@ -235,7 +235,8 @@ impl S3Pool {
             signer: Box::new(DummySigner {}),
             part_size: None,
             objects: Vec::with_capacity(1000),
-            start_after: None,
+            filter: None,
+            is_truncated: false,
         }
     }
 
@@ -288,9 +289,7 @@ impl S3Pool {
     }
 
     fn handle_list_response(&mut self, body: String) -> Result<(), Error> {
-        self.objects = s3object_list_xml_parser(&body)?;
-        // TODO
-        // parse start_after
+        (self.objects, self.is_truncated) = s3object_list_xml_parser(&body)?;
         Ok(())
     }
 
@@ -429,6 +428,43 @@ impl S3Pool {
         }
         Ok(output.into())
     }
+
+    async fn update_list(&mut self) -> Result<S3Object, Error> {
+        let last_object = self.objects.remove(0);
+        let mut params = Vec::<(&str, String)>::new();
+        if let Some(key) = &last_object.key {
+            params.push(("list-type", "2".to_string()));
+            params.push((
+                "start-after",
+                key.to_string()
+                    .strip_prefix('/')
+                    .expect("key should start with /")
+                    .to_string(),
+            ));
+        }
+
+        let mut bucket_object = last_object.clone();
+        bucket_object.key = None;
+        let (endpoint, virturalhost) = self.endpoint_and_virturalhost(bucket_object);
+        if let Some(Filter::Prefix(prefix)) = &self.filter {
+            params.push(("prefix", prefix.to_string()));
+        }
+        let url = if !params.is_empty() {
+            println!("{params:?}");
+            Url::parse_with_params(&endpoint, &params)?
+        } else {
+            Url::parse(&endpoint)?
+        };
+        let mut request = Request::new(Method::GET, url);
+
+        let now = Utc::now();
+        self.init_headers(request.headers_mut(), &now, virturalhost);
+        self.signer.sign(&mut request, &now);
+        let body = self.client.execute(request).await?.text().await?;
+        // TODO: validate start-after
+        self.handle_list_response(body)?;
+        Ok(last_object)
+    }
 }
 
 impl From<Handler<'_>> for S3Pool {
@@ -461,7 +497,8 @@ impl From<Handler<'_>> for S3Pool {
             signer,
             part_size: Some(5242880),
             objects: Vec::with_capacity(1000),
-            start_after: None,
+            filter: None,
+            is_truncated: false,
         }
     }
 }
@@ -499,7 +536,8 @@ impl From<&Handler<'_>> for S3Pool {
             signer,
             part_size: Some(5242880),
             objects: Vec::with_capacity(1000),
-            start_after: None,
+            filter: None,
+            is_truncated: false,
         }
     }
 }
@@ -574,6 +612,11 @@ impl DataPool for S3Pool {
         pool.signer.sign(&mut request, &now);
         let body = pool.client.execute(request).await?.text().await?;
         pool.handle_list_response(body)?;
+
+        // passing filter if the list did not complete
+        if filter.is_some() && pool.is_truncated {
+            pool.filter = Some(filter.as_ref().unwrap().clone());
+        }
         Ok(Box::new(pool))
     }
 
@@ -648,17 +691,17 @@ impl DataPool for S3Pool {
 #[async_trait]
 impl S3Folder for S3Pool {
     async fn next_object(&mut self) -> Result<Option<S3Object>, Error> {
-        // if self.objects.is_empty() && self.start_after.is_some() {
-        //     // let mut url = self.client.url.clone();
-        //     // url.query_pairs_mut()
-        //     //     .append_pair("start-after", &self.start_after.take().unwrap());
-        //     // let r = self.client.execute(Request::new(Method::GET, url)).await?;
-        //     // self.handle_response(r).await?;
-        // }
         if self.objects.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(self.objects.remove(0)))
+            if self.is_truncated && self.objects.len() == 1 {
+                println!("curent_object: {}", self.objects.len());
+                let last = self.update_list().await?;
+                println!("new_object: {}", self.objects.len());
+                Ok(Some(last))
+            } else {
+                Ok(Some(self.objects.remove(0)))
+            }
         }
     }
 }
@@ -962,7 +1005,8 @@ mod tests {
         let s = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>ant-lab</Name><Prefix></Prefix><Marker></Marker><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated><Contents><Key>14M</Key><LastModified>2020-01-31T14:58:45.000Z</LastModified><ETag>&quot;8ff43d748637d249d80d6f45e15c7663-3&quot;</ETag><Size>14336000</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>7M</Key><LastModified>2020-11-21T09:50:46.000Z</LastModified><ETag>&quot;cbe4f29b8b099989ae49afc02aa1c618-2&quot;</ETag><Size>7168000</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>7M.json</Key><LastModified>2020-09-19T14:59:23.000Z</LastModified><ETag>&quot;d34bd3f9aff10629ac49353312a42b0f-2&quot;</ETag><Size>7168000</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>get</Key><LastModified>2020-08-11T06:10:11.000Z</LastModified><ETag>&quot;f895d74af5106ce0c3d6cb008fb3b98d&quot;</ETag><Size>304</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>t</Key><LastModified>2020-09-19T15:10:08.000Z</LastModified><ETag>&quot;5050ef3558233dc04b3fac50eff68de1&quot;</ETag><Size>10</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>t.txt</Key><LastModified>2020-09-19T15:04:46.000Z</LastModified><ETag>&quot;5050ef3558233dc04b3fac50eff68de1&quot;</ETag><Size>10</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>test-orig</Key><LastModified>2020-11-21T09:48:29.000Z</LastModified><ETag>&quot;c059dadd468de1835bc99dab6e3b2cee-3&quot;</ETag><Size>11534336</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>test-s3handle</Key><LastModified>2020-11-21T10:09:39.000Z</LastModified><ETag>&quot;5dd39cab1c53c2c77cd352983f9641e1&quot;</ETag><Size>20</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>test.json</Key><LastModified>2020-08-11T09:54:42.000Z</LastModified><ETag>&quot;f895d74af5106ce0c3d6cb008fb3b98d&quot;</ETag><Size>304</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>";
         let mut pool = S3Pool::new("somewhere.in.the.world".to_string());
         pool.handle_list_response(s.to_string()).unwrap();
-        assert!(pool.next_object().await.unwrap().is_some());
+        assert!(!pool.objects.is_empty());
+        assert!(pool.is_truncated);
     }
 
     #[test]

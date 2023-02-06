@@ -200,7 +200,7 @@ impl Default for UrlStyle {
     }
 }
 
-pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
+pub fn s3object_list_xml_parser(body: &str) -> Result<(Vec<S3Object>, bool), Error> {
     let mut reader = Reader::from_str(body);
     let mut output = Vec::new();
     let mut in_name_tag = false;
@@ -209,6 +209,7 @@ pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
     let mut in_etag_tag = false;
     let mut in_storage_class_tag = false;
     let mut in_size_tag = false;
+    let mut in_truncated_tag = false;
     let mut bucket = String::new();
     let mut key = String::new();
     let mut mtime = String::new();
@@ -216,6 +217,7 @@ pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
     let mut storage_class = String::new();
     let mut size = 0;
     let mut buf = Vec::new();
+    let mut is_truncated = false;
     loop {
         match reader.read_event(&mut buf) {
             Ok(Event::Start(ref e)) => match e.name() {
@@ -225,6 +227,7 @@ pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
                 b"ETag" => in_etag_tag = true,
                 b"StorageClass" => in_storage_class_tag = true,
                 b"Size" => in_size_tag = true,
+                b"IsTruncated" => in_truncated_tag = true,
                 _ => {}
             },
             Ok(Event::End(ref e)) => match e.name() {
@@ -275,6 +278,14 @@ pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
                         .unwrap_or_default();
                     in_size_tag = false;
                 }
+                if in_truncated_tag {
+                    is_truncated = e
+                        .unescape_and_decode(&reader)
+                        .unwrap()
+                        .parse::<bool>()
+                        .unwrap_or_default();
+                    in_truncated_tag = false;
+                }
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(Error::XMLParseError(e)),
@@ -282,7 +293,7 @@ pub fn s3object_list_xml_parser(body: &str) -> Result<Vec<S3Object>, Error> {
         }
         buf.clear();
     }
-    Ok(output)
+    Ok((output, is_truncated))
 }
 
 pub fn upload_id_xml_parser(res: &str) -> Result<String, Error> {

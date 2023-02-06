@@ -7,7 +7,7 @@ use super::primitives::{Canal, PoolType};
 use crate::error::Error;
 use crate::utils::S3Object;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Filter {
     Prefix(String),
 }

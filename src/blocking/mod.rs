@@ -302,8 +302,10 @@ impl Handler<'_> {
                 };
             }
             Format::XML => {
+                // TODO handle is_truncated
                 buckets.extend(
                     s3object_list_xml_parser(std::str::from_utf8(res).unwrap_or(""))?
+                        .0
                         .iter()
                         .map(|o| o.bucket.clone().unwrap()),
                 );
@@ -347,9 +349,9 @@ impl Handler<'_> {
                     Format::XML => {
                         next_marker =
                             self.next_marker_xml_parser(std::str::from_utf8(body).unwrap_or(""));
-                        output.extend(s3object_list_xml_parser(
-                            std::str::from_utf8(body).unwrap_or(""),
-                        )?);
+                        output.extend(
+                            s3object_list_xml_parser(std::str::from_utf8(body).unwrap_or(""))?.0,
+                        );
                     }
                 }
             }
@@ -411,7 +413,7 @@ impl Handler<'_> {
                         }
                         Format::XML => {
                             next_marker = self.next_marker_xml_parser(&res);
-                            output.extend(s3object_list_xml_parser(&res)?);
+                            output.extend(s3object_list_xml_parser(&res)?.0);
                         }
                     }
                 }
@@ -439,9 +441,9 @@ impl Handler<'_> {
                         };
                     }
                     Format::XML => {
-                        output.extend(s3object_list_xml_parser(
-                            std::str::from_utf8(body).unwrap_or(""),
-                        )?);
+                        output.extend(
+                            s3object_list_xml_parser(std::str::from_utf8(body).unwrap_or(""))?.0,
+                        );
                     }
                 }
             }
