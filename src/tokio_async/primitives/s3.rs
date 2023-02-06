@@ -36,7 +36,7 @@ pub trait Signer: Send + Sync + DynClone + fmt::Debug {
 
 dyn_clone::clone_trait_object!(Signer);
 
-/// A dummy signer if you do not want sign any request
+/// A dummy signer if you do not want to sign any request to access a public resource
 #[derive(Clone, Debug)]
 pub struct DummySigner {}
 
