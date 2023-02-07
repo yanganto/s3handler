@@ -24,6 +24,8 @@ pub enum Error {
     PoolUninitializeError(),
     #[error("Header parsing error")]
     HeaderParsingError(),
+    #[error("No object specified to move")]
+    NoObject(),
 }
 
 impl From<std::io::Error> for Error {

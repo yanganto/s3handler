@@ -279,20 +279,29 @@ impl Canal {
 
     // Begin of IO api
     /// Push the object from down pool to up pool.
-    /// It will raise error if the canal is not will setup.
     pub async fn push(self) -> Result<(), Error> {
         match (self.up_pool, self.down_pool) {
             (Some(up_pool), Some(down_pool)) => {
-                let b = down_pool
-                    .pull(self.downstream_object.expect("should be upstream object"))
-                    .await?;
-                // TODO: make a default for target if unset
-                up_pool
-                    .push(
-                        self.upstream_object.expect("should be downstream object"),
-                        b,
-                    )
-                    .await?;
+                if let Some(downstream_object) = self.downstream_object {
+                    let b = down_pool.pull(downstream_object.clone()).await?;
+                    up_pool
+                        .push(self.upstream_object.unwrap_or(downstream_object), b)
+                        .await?;
+                    Ok(())
+                } else {
+                    Err(Error::NoObject())
+                }
+            }
+            _ => Err(Error::PoolUninitializeError()),
+        }
+    }
+
+    /// Push a specified object from up pool to down pool
+    pub async fn push_obj(&self, obj: S3Object) -> Result<(), Error> {
+        match (&self.up_pool, &self.down_pool) {
+            (Some(up_pool), Some(down_pool)) => {
+                let b = down_pool.pull(obj.clone()).await?;
+                up_pool.push(obj, b).await?;
                 Ok(())
             }
             _ => Err(Error::PoolUninitializeError()),
@@ -300,21 +309,29 @@ impl Canal {
     }
 
     /// Pull the object from up pool to down pool.
-    /// If object not specified, it will pull all the objects from up_pool
-    /// It will raise error if the canal is not will setup.
     pub async fn pull(self) -> Result<(), Error> {
         match (self.up_pool, self.down_pool) {
             (Some(up_pool), Some(down_pool)) => {
-                let b = up_pool
-                    .pull(self.upstream_object.expect("should be upstream object"))
-                    .await?;
-                // TODO: make a default for target if unset
-                down_pool
-                    .push(
-                        self.downstream_object.expect("should be downstream object"),
-                        b,
-                    )
-                    .await?;
+                if let Some(upstream_object) = self.upstream_object {
+                    let b = up_pool.pull(upstream_object.clone()).await?;
+                    down_pool
+                        .push(self.downstream_object.unwrap_or(upstream_object), b)
+                        .await?;
+                    Ok(())
+                } else {
+                    Err(Error::NoObject())
+                }
+            }
+            _ => Err(Error::PoolUninitializeError()),
+        }
+    }
+
+    /// Pull a specified object from up pool to down pool
+    pub async fn pull_obj(&self, obj: S3Object) -> Result<(), Error> {
+        match (&self.up_pool, &self.down_pool) {
+            (Some(up_pool), Some(down_pool)) => {
+                let b = up_pool.pull(obj.clone()).await?;
+                down_pool.push(obj, b).await?;
                 Ok(())
             }
             _ => Err(Error::PoolUninitializeError()),
