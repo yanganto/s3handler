@@ -690,14 +690,19 @@ impl DataPool for S3Pool {
 #[async_trait]
 impl S3Folder for S3Pool {
     async fn next_object(&mut self) -> Result<Option<S3Object>, Error> {
-        if self.objects.is_empty() {
-            Ok(None)
-        } else {
-            if self.is_truncated && self.objects.len() == 1 {
-                let last = self.update_list().await?;
-                Ok(Some(last))
+        loop {
+            if self.objects.is_empty() {
+                return Ok(None);
             } else {
-                Ok(Some(self.objects.remove(0)))
+                let obj = if self.is_truncated && self.objects.len() == 1 {
+                    let last = self.update_list().await?;
+                    last
+                } else {
+                    self.objects.remove(0)
+                };
+                if obj.key.is_some() {
+                    return Ok(Some(obj));
+                }
             }
         }
     }

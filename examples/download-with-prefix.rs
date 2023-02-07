@@ -1,6 +1,7 @@
 #[tokio::main]
 async fn main() {
     println!("Example for download one day database near protocol ");
+
     let mut collections = s3handler::none_blocking::primitives::S3Pool::new(
         "s3.ca-central-1.amazonaws.com".to_string(),
     )
@@ -10,7 +11,7 @@ async fn main() {
     .await
     .unwrap();
 
-    std::fs::create_dir_all("/tmp/backups/testnet/rpc/2023-02-06T00:00:29Z/")
+    std::fs::create_dir_all("/tmp/near-protocol-public/backups/testnet/rpc/2023-02-06T00:00:29Z/")
         .expect("Could not create folder for stroage");
 
     let cannel = s3handler::none_blocking::primitives::S3Pool::new(

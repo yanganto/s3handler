@@ -2,6 +2,7 @@ use super::file::FilePool;
 use crate::error::Error;
 use crate::tokio_async::traits::{DataPool, Filter, S3Folder};
 use crate::utils::S3Object;
+use url::Url;
 
 #[derive(Debug)]
 pub enum PoolType {
@@ -62,7 +63,11 @@ impl Canal {
     /// then toward to the `resource_location`,
     /// pull the object from uppool into down pool.
     pub async fn download_file(mut self, resource_location: &str) -> Result<(), Error> {
-        self.toward_pool(Box::new(FilePool::new(resource_location)?));
+        if let Ok(r) = Url::parse(resource_location) {
+            self.toward_pool(Box::new(FilePool::new(&r.scheme())?)); // for C://
+        } else {
+            self.toward_pool(Box::new(FilePool::new("/")?));
+        }
         self.downstream_object = Some(resource_location.into());
         match self.downstream_object.take() {
             Some(S3Object { bucket, key, .. }) if key.is_none() => {
@@ -87,7 +92,11 @@ impl Canal {
     /// then toward to the `resource_location`,
     /// push the object from uppool into down pool.
     pub async fn upload_file(mut self, resource_location: &str) -> Result<(), Error> {
-        self.toward_pool(Box::new(FilePool::new(resource_location)?));
+        if let Ok(r) = Url::parse(resource_location) {
+            self.toward_pool(Box::new(FilePool::new(&r.scheme())?)); // for C://
+        } else {
+            self.toward_pool(Box::new(FilePool::new("/")?));
+        }
         self.downstream_object = Some(resource_location.into());
         match self.downstream_object.take() {
             Some(S3Object { bucket, key, .. }) if key.is_none() => {

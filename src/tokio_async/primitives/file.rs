@@ -34,7 +34,7 @@ impl FilePool {
     pub fn new(path: &str) -> Result<Self, Error> {
         let mut fp = FilePool::default();
         if path.starts_with('/') {
-            fp.drive = "/".to_string();
+            fp.drive = path.to_string();
         } else if let Ok(r) = Url::parse(path) {
             if ["s3", "S3"].contains(&r.scheme()) {
                 return Err(Error::SchemeError());
@@ -52,7 +52,12 @@ impl DataPool for FilePool {
     async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error> {
         if let Some(b) = desc.bucket {
             let r = if let Some(k) = desc.key {
-                write(Path::new(&format!("{}{}{}", self.drive, b, k)), object).await
+                let path = if k.starts_with("/") {
+                    format!("{}{}{}", self.drive, b, k)
+                } else {
+                    format!("{}/{}{}", self.drive, b, k)
+                };
+                write(Path::new(&path), object).await
             } else {
                 create_dir(Path::new(&b)).await
             };
@@ -69,7 +74,12 @@ impl DataPool for FilePool {
             ..
         } = desc
         {
-            return match read(Path::new(&format!("{}{}{}", self.drive, b, k))).await {
+            let path = if k.starts_with("/") {
+                format!("{}{}{}", self.drive, b, k)
+            } else {
+                format!("{}/{}{}", self.drive, b, k)
+            };
+            return match read(Path::new(&path)).await {
                 // TODO: figure ouput how to use Bytes in tokio
                 Ok(c) => Ok(Bytes::copy_from_slice(&c)),
                 Err(e) => Err(e.into()),
