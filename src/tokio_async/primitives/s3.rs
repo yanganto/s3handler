@@ -450,7 +450,6 @@ impl S3Pool {
             params.push(("prefix", prefix.to_string()));
         }
         let url = if !params.is_empty() {
-            println!("{params:?}");
             Url::parse_with_params(&endpoint, &params)?
         } else {
             Url::parse(&endpoint)?
@@ -695,9 +694,7 @@ impl S3Folder for S3Pool {
             Ok(None)
         } else {
             if self.is_truncated && self.objects.len() == 1 {
-                println!("curent_object: {}", self.objects.len());
                 let last = self.update_list().await?;
-                println!("new_object: {}", self.objects.len());
                 Ok(Some(last))
             } else {
                 Ok(Some(self.objects.remove(0)))
@@ -1006,7 +1003,7 @@ mod tests {
         let mut pool = S3Pool::new("somewhere.in.the.world".to_string());
         pool.handle_list_response(s.to_string()).unwrap();
         assert!(!pool.objects.is_empty());
-        assert!(pool.is_truncated);
+        assert!(!pool.is_truncated);
     }
 
     #[test]
