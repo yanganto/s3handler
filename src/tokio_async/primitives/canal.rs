@@ -1,7 +1,8 @@
 use super::file::FilePool;
 use crate::error::Error;
-use crate::tokio_async::traits::{DataPool, S3Folder};
+use crate::tokio_async::traits::{DataPool, Filter, S3Folder};
 use crate::utils::S3Object;
+use url::Url;
 
 #[derive(Debug)]
 pub enum PoolType {
@@ -16,6 +17,7 @@ pub struct Canal {
     pub down_pool: Option<Box<dyn DataPool>>,
     pub downstream_object: Option<S3Object>,
     pub(crate) default: PoolType,
+    pub filter: Option<Filter>,
     // TODO: feature: data transformer
     // it may do encrypt, or format transformation here
     // upstream_obj_lambda:
@@ -61,7 +63,11 @@ impl Canal {
     /// then toward to the `resource_location`,
     /// pull the object from uppool into down pool.
     pub async fn download_file(mut self, resource_location: &str) -> Result<(), Error> {
-        self.toward_pool(Box::new(FilePool::new(resource_location)?));
+        if let Ok(r) = Url::parse(resource_location) {
+            self.toward_pool(Box::new(FilePool::new(&r.scheme())?)); // for C://
+        } else {
+            self.toward_pool(Box::new(FilePool::new("/")?));
+        }
         self.downstream_object = Some(resource_location.into());
         match self.downstream_object.take() {
             Some(S3Object { bucket, key, .. }) if key.is_none() => {
@@ -86,7 +92,11 @@ impl Canal {
     /// then toward to the `resource_location`,
     /// push the object from uppool into down pool.
     pub async fn upload_file(mut self, resource_location: &str) -> Result<(), Error> {
-        self.toward_pool(Box::new(FilePool::new(resource_location)?));
+        if let Ok(r) = Url::parse(resource_location) {
+            self.toward_pool(Box::new(FilePool::new(&r.scheme())?)); // for C://
+        } else {
+            self.toward_pool(Box::new(FilePool::new("/")?));
+        }
         self.downstream_object = Some(resource_location.into());
         match self.downstream_object.take() {
             Some(S3Object { bucket, key, .. }) if key.is_none() => {
@@ -176,6 +186,11 @@ impl Canal {
     /// The same as `bucket()`
     pub fn folder(self, folder_name: &str) -> Self {
         self._bucket(folder_name)
+    }
+
+    pub fn prefix(mut self, prefix_str: &str) -> Self {
+        self.filter = Some(Filter::Prefix(prefix_str.into()));
+        self
     }
 
     #[inline]
@@ -273,20 +288,29 @@ impl Canal {
 
     // Begin of IO api
     /// Push the object from down pool to up pool.
-    /// It will raise error if the canal is not will setup.
     pub async fn push(self) -> Result<(), Error> {
         match (self.up_pool, self.down_pool) {
             (Some(up_pool), Some(down_pool)) => {
-                let b = down_pool
-                    .pull(self.downstream_object.expect("should be upstream object"))
-                    .await?;
-                // TODO: make a default for target if unset
-                up_pool
-                    .push(
-                        self.upstream_object.expect("should be downstream object"),
-                        b,
-                    )
-                    .await?;
+                if let Some(downstream_object) = self.downstream_object {
+                    let b = down_pool.pull(downstream_object.clone()).await?;
+                    up_pool
+                        .push(self.upstream_object.unwrap_or(downstream_object), b)
+                        .await?;
+                    Ok(())
+                } else {
+                    Err(Error::NoObject())
+                }
+            }
+            _ => Err(Error::PoolUninitializeError()),
+        }
+    }
+
+    /// Push a specified object from up pool to down pool
+    pub async fn push_obj(&self, obj: S3Object) -> Result<(), Error> {
+        match (&self.up_pool, &self.down_pool) {
+            (Some(up_pool), Some(down_pool)) => {
+                let b = down_pool.pull(obj.clone()).await?;
+                up_pool.push(obj, b).await?;
                 Ok(())
             }
             _ => Err(Error::PoolUninitializeError()),
@@ -294,20 +318,29 @@ impl Canal {
     }
 
     /// Pull the object from up pool to down pool.
-    /// It will raise error if the canal is not will setup.
     pub async fn pull(self) -> Result<(), Error> {
         match (self.up_pool, self.down_pool) {
             (Some(up_pool), Some(down_pool)) => {
-                let b = up_pool
-                    .pull(self.upstream_object.expect("should be upstream object"))
-                    .await?;
-                // TODO: make a default for target if unset
-                down_pool
-                    .push(
-                        self.downstream_object.expect("should be downstream object"),
-                        b,
-                    )
-                    .await?;
+                if let Some(upstream_object) = self.upstream_object {
+                    let b = up_pool.pull(upstream_object.clone()).await?;
+                    down_pool
+                        .push(self.downstream_object.unwrap_or(upstream_object), b)
+                        .await?;
+                    Ok(())
+                } else {
+                    Err(Error::NoObject())
+                }
+            }
+            _ => Err(Error::PoolUninitializeError()),
+        }
+    }
+
+    /// Pull a specified object from up pool to down pool
+    pub async fn pull_obj(&self, obj: S3Object) -> Result<(), Error> {
+        match (&self.up_pool, &self.down_pool) {
+            (Some(up_pool), Some(down_pool)) => {
+                let b = up_pool.pull(obj.clone()).await?;
+                down_pool.push(obj, b).await?;
                 Ok(())
             }
             _ => Err(Error::PoolUninitializeError()),
@@ -359,7 +392,7 @@ impl Canal {
         Ok(self
             .up_pool
             .expect("upstream pool should exist")
-            .list(self.upstream_object)
+            .list(self.upstream_object, &self.filter)
             .await?)
     }
 
@@ -368,7 +401,7 @@ impl Canal {
         Ok(self
             .down_pool
             .expect("downstream pool should exist")
-            .list(self.downstream_object)
+            .list(self.downstream_object, &self.filter)
             .await?)
     }
 

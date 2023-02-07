@@ -17,16 +17,16 @@ use url::form_urlencoded;
 use super::canal::{Canal, PoolType};
 use crate::blocking::{AuthType, Handler};
 use crate::error::Error;
-use crate::tokio_async::traits::{DataPool, S3Folder};
+use crate::tokio_async::traits::{DataPool, Filter, S3Folder};
 use crate::utils::{
     s3object_list_xml_parser, upload_id_xml_parser, S3Convert, S3Object, UrlStyle, DEFAULT_REGION,
 };
 
 type UTCTime = DateTime<Utc>;
 
-pub trait Authorizer: Send + Sync + DynClone + fmt::Debug {
+pub trait Signer: Send + Sync + DynClone + fmt::Debug {
     /// This method will setup the header and put the authorize string
-    fn authorize(&self, _request: &mut Request, _now: &UTCTime) {
+    fn sign(&self, _request: &mut Request, _now: &UTCTime) {
         unimplemented!()
     }
 
@@ -34,17 +34,18 @@ pub trait Authorizer: Send + Sync + DynClone + fmt::Debug {
     fn update_region(&mut self, _region: String) {}
 }
 
-dyn_clone::clone_trait_object!(Authorizer);
+dyn_clone::clone_trait_object!(Signer);
 
+/// A dummy signer if you do not want to sign any request to access a public resource
 #[derive(Clone, Debug)]
-pub struct PublicAuthorizer {}
+pub struct DummySigner {}
 
-impl Authorizer for PublicAuthorizer {
-    fn authorize(&self, _requests: &mut Request, _now: &UTCTime) {}
+impl Signer for DummySigner {
+    fn sign(&self, _requests: &mut Request, _now: &UTCTime) {}
 }
 
 #[derive(Clone, Debug)]
-pub struct V2Authorizer {
+pub struct V2AuthSigner {
     pub access_key: String,
     pub secret_key: String,
     pub auth_str: String,
@@ -52,10 +53,10 @@ pub struct V2Authorizer {
 }
 
 #[allow(dead_code)]
-impl V2Authorizer {
-    /// new V2 Authorizer compatible with AWS and CEPH
+impl V2AuthSigner {
+    /// new V2 auth signer compatible with AWS and CEPH
     pub fn new(access_key: String, secret_key: String) -> Self {
-        V2Authorizer {
+        V2AuthSigner {
             access_key,
             secret_key,
             auth_str: "AWS".to_string(),
@@ -77,21 +78,21 @@ impl V2Authorizer {
     }
 }
 
-impl Authorizer for V2Authorizer {
-    fn authorize(&self, request: &mut Request, _now: &UTCTime) {
-        let authorize_string = format!(
+impl Signer for V2AuthSigner {
+    fn sign(&self, request: &mut Request, _now: &UTCTime) {
+        let auth_string = format!(
             "{} {}:{}",
             self.auth_str,
             self.access_key,
             <Request as V2Signature>::sign(request, &self.secret_key)
         );
         let headers = request.headers_mut();
-        headers.insert(header::AUTHORIZATION, authorize_string.parse().unwrap());
+        headers.insert(header::AUTHORIZATION, auth_string.parse().unwrap());
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct V4Authorizer {
+pub struct V4AuthSigner {
     pub access_key: String,
     pub secret_key: String,
     pub region: String,
@@ -102,10 +103,10 @@ pub struct V4Authorizer {
 }
 
 #[allow(dead_code)]
-impl V4Authorizer {
-    /// new V4 Authorizer for AWS and CEPH
+impl V4AuthSigner {
+    /// new V4 Auth signer for AWS and CEPH
     pub fn new(access_key: String, secret_key: String, region: String) -> Self {
-        V4Authorizer {
+        V4AuthSigner {
             access_key,
             secret_key,
             region,
@@ -145,8 +146,8 @@ impl V4Authorizer {
     }
 }
 
-impl Authorizer for V4Authorizer {
-    fn authorize(&self, request: &mut Request, now: &UTCTime) {
+impl Signer for V4AuthSigner {
+    fn sign(&self, request: &mut Request, now: &UTCTime) {
         let SignatureInfo {
             signed_headers,
             signature,
@@ -194,11 +195,12 @@ pub struct S3Pool {
 
     client: Client,
 
-    pub authorizer: Box<dyn Authorizer>,
+    /// The signer to adapt different protocol of data source
+    pub signer: Box<dyn Signer>,
 
     objects: Vec<S3Object>,
-    #[allow(dead_code)]
-    start_after: Option<String>,
+    filter: Option<Filter>,
+    is_truncated: bool,
 }
 
 impl S3Pool {
@@ -209,6 +211,7 @@ impl S3Pool {
             upstream_object: Some(bucket_name.into()),
             downstream_object: None,
             default: PoolType::UpPool,
+            filter: None,
         }
     }
 
@@ -219,6 +222,7 @@ impl S3Pool {
             upstream_object: Some(s3_object),
             downstream_object: None,
             default: PoolType::UpPool,
+            filter: None,
         }
     }
 
@@ -228,21 +232,22 @@ impl S3Pool {
             secure: false,
             url_style: UrlStyle::PATH,
             client: Client::new(),
-            authorizer: Box::new(PublicAuthorizer {}),
+            signer: Box::new(DummySigner {}),
             part_size: None,
             objects: Vec::with_capacity(1000),
-            start_after: None,
+            filter: None,
+            is_truncated: false,
         }
     }
 
     pub fn aws_v2(mut self, access_key: String, secret_key: String) -> Self {
-        self.authorizer = Box::new(V2Authorizer::new(access_key, secret_key));
+        self.signer = Box::new(V2AuthSigner::new(access_key, secret_key));
         self.url_style = UrlStyle::PATH;
         self
     }
 
     pub fn aws_v4(mut self, access_key: String, secret_key: String, region: String) -> Self {
-        self.authorizer = Box::new(V4Authorizer::new(access_key, secret_key, region));
+        self.signer = Box::new(V4AuthSigner::new(access_key, secret_key, region));
         self.url_style = UrlStyle::HOST;
         self
     }
@@ -284,9 +289,7 @@ impl S3Pool {
     }
 
     fn handle_list_response(&mut self, body: String) -> Result<(), Error> {
-        self.objects = s3object_list_xml_parser(&body)?;
-        // TODO
-        // parse start_after
+        (self.objects, self.is_truncated) = s3object_list_xml_parser(&body)?;
         Ok(())
     }
 
@@ -306,7 +309,7 @@ impl S3Pool {
 
         let now = Utc::now();
         self.init_headers(request.headers_mut(), &now, virturalhost);
-        self.authorizer.authorize(&mut request, &now);
+        self.signer.sign(&mut request, &now);
 
         let r = self.client.execute(request).await?;
 
@@ -344,7 +347,7 @@ impl S3Pool {
 
             let now = Utc::now();
             self.init_headers(request.headers_mut(), &now, virtural_host);
-            self.authorizer.authorize(&mut request, &now);
+            self.signer.sign(&mut request, &now);
             req_list.push(self.client.execute(request));
             start += part_size
         }
@@ -376,7 +379,7 @@ impl S3Pool {
         let mut request = self.client.post(&url).body(content.into_bytes()).build()?;
         let now = Utc::now();
         self.init_headers(request.headers_mut(), &now, virturalhost);
-        self.authorizer.authorize(&mut request, &now);
+        self.signer.sign(&mut request, &now);
         let r = self.client.execute(request).await?;
         Ok(r)
     }
@@ -406,7 +409,7 @@ impl S3Pool {
 
             let now = Utc::now();
             self.init_headers(headers, &now, virturalhost);
-            self.authorizer.authorize(&mut request, &now);
+            self.signer.sign(&mut request, &now);
             req_list.push(self.client.execute(request));
             start += part_size
         }
@@ -425,6 +428,42 @@ impl S3Pool {
         }
         Ok(output.into())
     }
+
+    async fn update_list(&mut self) -> Result<S3Object, Error> {
+        let last_object = self.objects.remove(0);
+        let mut params = Vec::<(&str, String)>::new();
+        if let Some(key) = &last_object.key {
+            params.push(("list-type", "2".to_string()));
+            params.push((
+                "start-after",
+                key.to_string()
+                    .strip_prefix('/')
+                    .expect("key should start with /")
+                    .to_string(),
+            ));
+        }
+
+        let mut bucket_object = last_object.clone();
+        bucket_object.key = None;
+        let (endpoint, virturalhost) = self.endpoint_and_virturalhost(bucket_object);
+        if let Some(Filter::Prefix(prefix)) = &self.filter {
+            params.push(("prefix", prefix.to_string()));
+        }
+        let url = if !params.is_empty() {
+            Url::parse_with_params(&endpoint, &params)?
+        } else {
+            Url::parse(&endpoint)?
+        };
+        let mut request = Request::new(Method::GET, url);
+
+        let now = Utc::now();
+        self.init_headers(request.headers_mut(), &now, virturalhost);
+        self.signer.sign(&mut request, &now);
+        let body = self.client.execute(request).await?.text().await?;
+        // TODO: validate start-after
+        self.handle_list_response(body)?;
+        Ok(last_object)
+    }
 }
 
 impl From<Handler<'_>> for S3Pool {
@@ -440,13 +479,13 @@ impl From<Handler<'_>> for S3Pool {
             ..
         } = handler;
 
-        let authorizer: Box<dyn Authorizer> = match auth_type {
-            AuthType::AWS4 => Box::new(V4Authorizer::new(
+        let signer: Box<dyn Signer> = match auth_type {
+            AuthType::AWS4 => Box::new(V4AuthSigner::new(
                 access_key.into(),
                 secret_key.into(),
                 region.unwrap_or_else(|| DEFAULT_REGION.to_string()),
             )),
-            AuthType::AWS2 => Box::new(V2Authorizer::new(access_key.into(), secret_key.into())),
+            AuthType::AWS2 => Box::new(V2AuthSigner::new(access_key.into(), secret_key.into())),
         };
 
         Self {
@@ -454,10 +493,11 @@ impl From<Handler<'_>> for S3Pool {
             secure,
             url_style,
             client: Client::new(),
-            authorizer,
+            signer,
             part_size: Some(5242880),
             objects: Vec::with_capacity(1000),
-            start_after: None,
+            filter: None,
+            is_truncated: false,
         }
     }
 }
@@ -475,13 +515,13 @@ impl From<&Handler<'_>> for S3Pool {
             ..
         } = handler;
 
-        let authorizer: Box<dyn Authorizer> = match auth_type {
-            AuthType::AWS4 => Box::new(V4Authorizer::new(
+        let signer: Box<dyn Signer> = match auth_type {
+            AuthType::AWS4 => Box::new(V4AuthSigner::new(
                 access_key.to_string(),
                 secret_key.to_string(),
                 region.clone().unwrap_or_else(|| DEFAULT_REGION.to_string()),
             )),
-            AuthType::AWS2 => Box::new(V2Authorizer::new(
+            AuthType::AWS2 => Box::new(V2AuthSigner::new(
                 access_key.to_string(),
                 secret_key.to_string(),
             )),
@@ -492,10 +532,11 @@ impl From<&Handler<'_>> for S3Pool {
             secure,
             url_style: url_style.clone(),
             client: Client::new(),
-            authorizer,
+            signer,
             part_size: Some(5242880),
             objects: Vec::with_capacity(1000),
-            start_after: None,
+            filter: None,
+            is_truncated: false,
         }
     }
 }
@@ -519,7 +560,7 @@ impl DataPool for S3Pool {
 
             let now = Utc::now();
             self.init_headers(request.headers_mut(), &now, virturalhost);
-            self.authorizer.authorize(&mut request, &now);
+            self.signer.sign(&mut request, &now);
             self.client.execute(request).await?
         };
         // TODO validate _r status code
@@ -543,7 +584,7 @@ impl DataPool for S3Pool {
 
             let now = Utc::now();
             self.init_headers(request.headers_mut(), &now, virturalhost);
-            self.authorizer.authorize(&mut request, &now);
+            self.signer.sign(&mut request, &now);
 
             let r = self.client.execute(request).await?;
             // TODO validate status code
@@ -551,16 +592,30 @@ impl DataPool for S3Pool {
         }
     }
 
-    async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error> {
+    async fn list(
+        &self,
+        index: Option<S3Object>,
+        filter: &Option<Filter>,
+    ) -> Result<Box<dyn S3Folder>, Error> {
         let mut pool = self.clone();
         let (endpoint, virturalhost) = self.endpoint_and_virturalhost(index.unwrap_or_default());
-        let mut request = Request::new(Method::GET, Url::parse(&endpoint)?);
+        let url = if let Some(Filter::Prefix(prefix)) = filter {
+            Url::parse_with_params(&endpoint, &[("prefix", prefix)])?
+        } else {
+            Url::parse(&endpoint)?
+        };
+        let mut request = Request::new(Method::GET, url);
 
         let now = Utc::now();
         pool.init_headers(request.headers_mut(), &now, virturalhost);
-        pool.authorizer.authorize(&mut request, &now);
+        pool.signer.sign(&mut request, &now);
         let body = pool.client.execute(request).await?.text().await?;
         pool.handle_list_response(body)?;
+
+        // passing filter if the list did not complete
+        if filter.is_some() && pool.is_truncated {
+            pool.filter = Some(filter.as_ref().unwrap().clone());
+        }
         Ok(Box::new(pool))
     }
 
@@ -570,7 +625,7 @@ impl DataPool for S3Pool {
 
         let now = Utc::now();
         self.init_headers(request.headers_mut(), &now, virturalhost);
-        self.authorizer.authorize(&mut request, &now);
+        self.signer.sign(&mut request, &now);
 
         let _r = self.client.execute(request).await?;
         // TODO validate status code
@@ -591,7 +646,7 @@ impl DataPool for S3Pool {
 
         let now = Utc::now();
         self.init_headers(request.headers_mut(), &now, virturalhost);
-        self.authorizer.authorize(&mut request, &now);
+        self.signer.sign(&mut request, &now);
 
         let r = self.client.execute(request).await?;
         let headers = r.headers();
@@ -635,17 +690,20 @@ impl DataPool for S3Pool {
 #[async_trait]
 impl S3Folder for S3Pool {
     async fn next_object(&mut self) -> Result<Option<S3Object>, Error> {
-        // if self.objects.is_empty() && self.start_after.is_some() {
-        //     // let mut url = self.client.url.clone();
-        //     // url.query_pairs_mut()
-        //     //     .append_pair("start-after", &self.start_after.take().unwrap());
-        //     // let r = self.client.execute(Request::new(Method::GET, url)).await?;
-        //     // self.handle_response(r).await?;
-        // }
-        if self.objects.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(self.objects.remove(0)))
+        loop {
+            if self.objects.is_empty() {
+                return Ok(None);
+            } else {
+                let obj = if self.is_truncated && self.objects.len() == 1 {
+                    let last = self.update_list().await?;
+                    last
+                } else {
+                    self.objects.remove(0)
+                };
+                if obj.key.is_some() {
+                    return Ok(Some(obj));
+                }
+            }
         }
     }
 }
@@ -949,7 +1007,8 @@ mod tests {
         let s = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>ant-lab</Name><Prefix></Prefix><Marker></Marker><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated><Contents><Key>14M</Key><LastModified>2020-01-31T14:58:45.000Z</LastModified><ETag>&quot;8ff43d748637d249d80d6f45e15c7663-3&quot;</ETag><Size>14336000</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>7M</Key><LastModified>2020-11-21T09:50:46.000Z</LastModified><ETag>&quot;cbe4f29b8b099989ae49afc02aa1c618-2&quot;</ETag><Size>7168000</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>7M.json</Key><LastModified>2020-09-19T14:59:23.000Z</LastModified><ETag>&quot;d34bd3f9aff10629ac49353312a42b0f-2&quot;</ETag><Size>7168000</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>get</Key><LastModified>2020-08-11T06:10:11.000Z</LastModified><ETag>&quot;f895d74af5106ce0c3d6cb008fb3b98d&quot;</ETag><Size>304</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>t</Key><LastModified>2020-09-19T15:10:08.000Z</LastModified><ETag>&quot;5050ef3558233dc04b3fac50eff68de1&quot;</ETag><Size>10</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>t.txt</Key><LastModified>2020-09-19T15:04:46.000Z</LastModified><ETag>&quot;5050ef3558233dc04b3fac50eff68de1&quot;</ETag><Size>10</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>test-orig</Key><LastModified>2020-11-21T09:48:29.000Z</LastModified><ETag>&quot;c059dadd468de1835bc99dab6e3b2cee-3&quot;</ETag><Size>11534336</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>test-s3handle</Key><LastModified>2020-11-21T10:09:39.000Z</LastModified><ETag>&quot;5dd39cab1c53c2c77cd352983f9641e1&quot;</ETag><Size>20</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents><Contents><Key>test.json</Key><LastModified>2020-08-11T09:54:42.000Z</LastModified><ETag>&quot;f895d74af5106ce0c3d6cb008fb3b98d&quot;</ETag><Size>304</Size><Owner><ID>54bbddd7c9c485b696f5b188467d4bec889b83d3862d0a6db526d9d17aadcee2</ID><DisplayName>yanganto</DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>";
         let mut pool = S3Pool::new("somewhere.in.the.world".to_string());
         pool.handle_list_response(s.to_string()).unwrap();
-        assert!(pool.next_object().await.unwrap().is_some());
+        assert!(!pool.objects.is_empty());
+        assert!(!pool.is_truncated);
     }
 
     #[test]

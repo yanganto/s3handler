@@ -6,7 +6,7 @@ use tokio::fs::{create_dir, read, read_dir, remove_dir_all, remove_file, write, 
 use url::Url;
 
 use crate::error::Error;
-use crate::tokio_async::traits::{DataPool, S3Folder};
+use crate::tokio_async::traits::{DataPool, Filter, S3Folder};
 use crate::utils::S3Object;
 
 #[async_trait]
@@ -34,7 +34,7 @@ impl FilePool {
     pub fn new(path: &str) -> Result<Self, Error> {
         let mut fp = FilePool::default();
         if path.starts_with('/') {
-            fp.drive = "/".to_string();
+            fp.drive = path.to_string();
         } else if let Ok(r) = Url::parse(path) {
             if ["s3", "S3"].contains(&r.scheme()) {
                 return Err(Error::SchemeError());
@@ -52,7 +52,12 @@ impl DataPool for FilePool {
     async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error> {
         if let Some(b) = desc.bucket {
             let r = if let Some(k) = desc.key {
-                write(Path::new(&format!("{}{}{}", self.drive, b, k)), object).await
+                let path = if k.starts_with("/") {
+                    format!("{}{}{}", self.drive, b, k)
+                } else {
+                    format!("{}/{}{}", self.drive, b, k)
+                };
+                write(Path::new(&path), object).await
             } else {
                 create_dir(Path::new(&b)).await
             };
@@ -69,7 +74,12 @@ impl DataPool for FilePool {
             ..
         } = desc
         {
-            return match read(Path::new(&format!("{}{}{}", self.drive, b, k))).await {
+            let path = if k.starts_with("/") {
+                format!("{}{}{}", self.drive, b, k)
+            } else {
+                format!("{}/{}{}", self.drive, b, k)
+            };
+            return match read(Path::new(&path)).await {
                 // TODO: figure ouput how to use Bytes in tokio
                 Ok(c) => Ok(Bytes::copy_from_slice(&c)),
                 Err(e) => Err(e.into()),
@@ -78,7 +88,14 @@ impl DataPool for FilePool {
         Err(Error::PullEmptyObjectError())
     }
 
-    async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error> {
+    async fn list(
+        &self,
+        index: Option<S3Object>,
+        filter: &Option<Filter>,
+    ) -> Result<Box<dyn S3Folder>, Error> {
+        if filter.is_some() {
+            unimplemented!("filter for file system is not implemented")
+        }
         match index {
             Some(S3Object {
                 bucket: Some(b),

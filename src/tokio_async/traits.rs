@@ -7,6 +7,11 @@ use super::primitives::{Canal, PoolType};
 use crate::error::Error;
 use crate::utils::S3Object;
 
+#[derive(Clone, Debug)]
+pub enum Filter {
+    Prefix(String),
+}
+
 #[async_trait]
 pub trait S3Folder: Debug {
     async fn next_object(&mut self) -> Result<Option<S3Object>, Error>;
@@ -17,7 +22,11 @@ pub trait DataPool: Send + Sync + Debug {
     async fn push(&self, desc: S3Object, object: Bytes) -> Result<(), Error>;
     async fn pull(&self, desc: S3Object) -> Result<Bytes, Error>;
     /// The index will be treated as a folder object to filter the list results
-    async fn list(&self, index: Option<S3Object>) -> Result<Box<dyn S3Folder>, Error>;
+    async fn list(
+        &self,
+        index: Option<S3Object>,
+        filter: &Option<Filter>,
+    ) -> Result<Box<dyn S3Folder>, Error>;
     async fn remove(&self, desc: S3Object) -> Result<(), Error>;
     /// TODO: sync feature
     /// This method is for the sync feature
@@ -39,6 +48,7 @@ pub trait DataPool: Send + Sync + Debug {
                 upstream_object: None,
                 downstream_object: Some(resource_location.into()),
                 default: PoolType::DownPool,
+                filter: None,
             }),
         }
     }
@@ -54,6 +64,7 @@ pub trait DataPool: Send + Sync + Debug {
                 upstream_object: Some(resource_location.into()),
                 downstream_object: None,
                 default: PoolType::UpPool,
+                filter: None,
             }),
         }
     }
